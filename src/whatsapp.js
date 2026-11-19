@@ -16,19 +16,28 @@ const { SYSTEM_TYPES, TYPE_LABELS, timeParts, inRange, cacheKey } = require('./f
 const { extFor, Semaphore } = require('./media');
 
 // The login session is kept outside OneDrive so OneDrive sync can't lock Chrome's profile files.
-const SESSION_ROOT = path.join(process.env.LOCALAPPDATA || os.homedir(), 'WhatsAppChatExporter');
-const CLIENT_ID = 'exporter';
-const MEDIA_CACHE = path.join(SESSION_ROOT, 'media-cache'); // downloaded photos/videos, reused by preview + export
-const PEOPLE_FILE = path.join(SESSION_ROOT, 'people-cache.json'); // sender names/numbers, so groups reopen fast
+const SESSION_ROOT = process.env.DATA_DIR || path.join(process.env.LOCALAPPDATA || os.homedir(), 'WhatsAppChatExporter');
+
+/**
+ * Folders of one login session. The PC app uses the id 'exporter' (the original folder names, so an
+ * existing login keeps working); every cloud visitor gets their own id and their own folders.
+ */
+function sessionPaths(id) {
+  const sfx = id === 'exporter' ? '' : `-${id}`;
+  return {
+    sessionDir: path.join(SESSION_ROOT, `session-${id}`),
+    ok: path.join(SESSION_ROOT, `session-ok${sfx}`), // written once a login reaches "ready"
+    media: path.join(SESSION_ROOT, `media-cache${sfx}`), // downloaded photos/videos, reused by preview + export
+    people: path.join(SESSION_ROOT, `people-cache${sfx}.json`), // sender names/numbers, so groups reopen fast
+    // Chrome's HTTP cache lives outside the session folder, so WhatsApp Web's ~10 MB of scripts are
+    // downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
+    browserCache: path.join(SESSION_ROOT, `browser-cache${sfx}`),
+  };
+}
 const PEOPLE_TTL = 7 * 24 * 60 * 60 * 1000;
 const MAX_MSG_REFS = 40000;
 const CACHE_TTL = 10 * 60 * 1000;
 const CHAT_LIST_TTL = 2 * 60 * 1000;
-const SESSION_DIR = path.join(SESSION_ROOT, `session-${CLIENT_ID}`);
-const SESSION_OK = path.join(SESSION_ROOT, 'session-ok'); // written once a login reaches "ready"
-// Chrome's HTTP cache lives outside the session folder, so WhatsApp Web's ~10 MB of scripts are
-// downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
-const BROWSER_CACHE = path.join(SESSION_ROOT, 'browser-cache');
 const LOAD_TIMEOUT_MS = 3 * 60 * 1000; // whatsapp-web.js gives WhatsApp Web only 30 s to load by default
 const READY_WATCHDOG_MS = 5 * 60 * 1000; // linked, but no sync progress for this long → reconnect
 const MAX_STUCK_RESTARTS = 2;
@@ -78,14 +87,16 @@ function findBrowser() {
       path.join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     );
   }
+  // Linux servers / Docker
+  candidates.push('/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome');
   return candidates.find((p) => p && fs.existsSync(p));
 }
 
 // If the server window was closed abruptly, its hidden Chrome can survive and keep the session
 // folder locked, which makes the next start fail. Close only Chrome/Edge processes using our session folder.
-function killStaleBrowsers() {
+function killStaleBrowsers(sessionDir) {
   if (process.platform !== 'win32') return;
-  const dir = SESSION_ROOT.replace(/'/g, "''");
+  const dir = sessionDir.replace(/'/g, "''");
   const script = "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='msedge.exe'\" | "
     + `Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | `
     + 'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
@@ -139,8 +150,11 @@ function describe(m) {
 }
 
 class WhatsAppService extends EventEmitter {
-  constructor() {
+  /** @param {{ id?: string }} [opts] session id ('exporter' = the PC app's single session) */
+  constructor(opts = {}) {
     super();
+    this.clientId = opts.id || 'exporter';
+    this.paths = sessionPaths(this.clientId);
     this.client = null;
     this.state = 'idle';
     this.message = '';
@@ -176,9 +190,9 @@ class WhatsAppService extends EventEmitter {
 
   /** A login that never reached "ready" can leave half-written data that makes the next link fail. */
   clearUnfinishedSession() {
-    if (fs.existsSync(SESSION_OK) || !fs.existsSync(SESSION_DIR)) return;
+    if (fs.existsSync(this.paths.ok) || !fs.existsSync(this.paths.sessionDir)) return;
     try {
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+      fs.rmSync(this.paths.sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
       console.log('[whatsapp] cleared an unfinished login session — a fresh QR will be shown');
     } catch (err) {
       console.warn('[whatsapp] could not clear old session:', err.message);
@@ -187,8 +201,8 @@ class WhatsAppService extends EventEmitter {
 
   markSession(valid) {
     try {
-      if (valid) fs.writeFileSync(SESSION_OK, new Date().toISOString());
-      else fs.rmSync(SESSION_OK, { force: true });
+      if (valid) fs.writeFileSync(this.paths.ok, new Date().toISOString());
+      else fs.rmSync(this.paths.ok, { force: true });
     } catch { /* not critical */ }
   }
 
@@ -198,7 +212,7 @@ class WhatsAppService extends EventEmitter {
     this.startedAt = Date.now();
     this.lastSyncProgressAt = 0;
     this.set('starting', 'Opening WhatsApp Web…');
-    killStaleBrowsers();
+    killStaleBrowsers(this.paths.sessionDir);
     this.clearUnfinishedSession();
 
     // Timing of each login step, printed in the server window to see where time goes.
@@ -211,7 +225,7 @@ class WhatsAppService extends EventEmitter {
     };
 
     const client = new Client({
-      authStrategy: new ExporterAuth({ clientId: CLIENT_ID, dataPath: SESSION_ROOT }),
+      authStrategy: new ExporterAuth({ clientId: this.clientId, dataPath: SESSION_ROOT }),
       authTimeoutMs: LOAD_TIMEOUT_MS,
       puppeteer: {
         headless: true,
@@ -223,7 +237,7 @@ class WhatsAppService extends EventEmitter {
           '--no-default-browser-check', '--disable-extensions', '--disable-default-apps', '--disable-sync',
           '--disable-background-networking', '--disable-component-update', '--mute-audio',
           '--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,CalculateNativeWinOcclusion',
-          `--disk-cache-dir=${BROWSER_CACHE}`, '--disk-cache-size=268435456',
+          `--disk-cache-dir=${this.paths.browserCache}`, '--disk-cache-size=268435456',
         ],
       },
     });
@@ -327,6 +341,26 @@ class WhatsAppService extends EventEmitter {
     }
   }
 
+  /**
+   * Cloud: end this visitor's session for good — unlink the device from their phone if it is linked,
+   * close the browser and delete every file kept for them on the server.
+   */
+  async purge() {
+    this.stopping = true;
+    try {
+      if (this.client && this.state === 'ready') await this.client.logout();
+    } catch (err) {
+      console.warn('[purge] logout failed:', err.message);
+    }
+    await this.destroy();
+    clearTimeout(this.peopleTimer);
+    this.people.clear();
+    const { sessionDir, ok, media, people, browserCache } = this.paths;
+    for (const p of [sessionDir, ok, media, people, browserCache]) {
+      try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }); } catch { /* best effort */ }
+    }
+  }
+
   /** Manual "Retry" button: start over with fresh retry budgets. */
   retry() {
     this.startRetries = 0;
@@ -397,7 +431,7 @@ class WhatsAppService extends EventEmitter {
     clearTimeout(this.peopleTimer);
     this.people.clear();
     this.markSession(false);
-    for (const dir of [SESSION_DIR, MEDIA_CACHE, PEOPLE_FILE]) {
+    for (const dir of [this.paths.sessionDir, this.paths.media, this.paths.people]) {
       try {
         fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 });
       } catch (err) {
@@ -597,7 +631,7 @@ class WhatsAppService extends EventEmitter {
 
   loadPeople() {
     try {
-      const saved = JSON.parse(fs.readFileSync(PEOPLE_FILE, 'utf8'));
+      const saved = JSON.parse(fs.readFileSync(this.paths.people, 'utf8'));
       const now = Date.now();
       for (const [id, p] of Object.entries(saved)) {
         if (p && p.name && now - (p.at || 0) < PEOPLE_TTL) this.people.set(id, p);
@@ -610,7 +644,7 @@ class WhatsAppService extends EventEmitter {
     this.peopleTimer = setTimeout(() => {
       try {
         fs.mkdirSync(SESSION_ROOT, { recursive: true });
-        fs.writeFileSync(PEOPLE_FILE, JSON.stringify(Object.fromEntries(this.people)));
+        fs.writeFileSync(this.paths.people, JSON.stringify(Object.fromEntries(this.people)));
       } catch (err) { console.warn('[people] could not save cache:', err.message); }
     }, 1500);
   }
@@ -693,12 +727,12 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Full media file for a message, downloaded once and kept in MEDIA_CACHE.
+   * Full media file for a message, downloaded once and kept in this session's media cache.
    * Resolves to { path, mimetype, filename } or null when WhatsApp no longer has the file.
    */
   async getMediaFile(id) {
     const key = crypto.createHash('sha1').update(id).digest('hex');
-    const metaPath = path.join(MEDIA_CACHE, `${key}.json`);
+    const metaPath = path.join(this.paths.media, `${key}.json`);
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
       if (fs.existsSync(meta.path)) return meta;
@@ -714,8 +748,8 @@ class WhatsAppService extends EventEmitter {
       if (!msg || !msg.hasMedia) return null;
       const res = await msg.downloadMediaStream();
       if (!res) return null;
-      fs.mkdirSync(MEDIA_CACHE, { recursive: true });
-      const file = path.join(MEDIA_CACHE, `${key}.${extFor(res.mimetype, res.filename)}`);
+      fs.mkdirSync(this.paths.media, { recursive: true });
+      const file = path.join(this.paths.media, `${key}.${extFor(res.mimetype, res.filename)}`);
       const part = `${file}.part`;
       try {
         await pipeline(res.stream, fs.createWriteStream(part));
