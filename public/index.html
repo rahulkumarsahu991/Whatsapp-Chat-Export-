@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#05060f">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <title>WhatsApp Chat Exporter</title>
+  <meta name="description" content="Scan the QR, pick a group and export its chats, photos and videos.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%2325d366'/%3E%3Cpath d='M32 14a18 18 0 0 0-15.6 27L14 50l9.2-2.4A18 18 0 1 0 32 14z' fill='none' stroke='white' stroke-width='4'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- fonts load without blocking the first paint (system fonts show until they arrive) -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="min-h-full overflow-x-hidden bg-ink font-sans text-slate-100 antialiased">
+  <div id="demoRibbon" hidden class="pointer-events-none fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border border-amber-300/30 bg-amber-300/15 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200 max-md:hidden">
+    Demo mode · sample data
+  </div>
+
+  <!-- ================= LOGIN (QR) ================= -->
+  <section id="login" class="mx-auto grid max-w-7xl items-center gap-8 px-4 pb-[calc(2.5rem+env(safe-area-inset-bottom))] pt-[max(1.5rem,env(safe-area-inset-top))] sm:gap-10 sm:px-8 sm:py-10 lg:grid-cols-[1.1fr_1fr] lg:gap-16 lg:px-12">
+    <div class="animate-rise">
+      <div class="mb-5 inline-flex items-center gap-2.5 rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs font-medium text-slate-300 sm:mb-6">
+        <span class="relative flex size-2"><span class="absolute inline-flex size-full animate-ping rounded-full bg-wa opacity-75"></span><span class="relative inline-flex size-2 rounded-full bg-wa"></span></span>
+        Runs 100% on this computer
+      </div>
+      <h1 class="font-display text-[2.15rem] font-bold leading-[1.05] tracking-tight sm:text-6xl xl:text-7xl">
+        Export WhatsApp<br><span class="text-gradient">chats &amp; media.</span>
+      </h1>
+      <p class="mt-4 max-w-xl text-[15px] leading-relaxed text-slate-400 sm:mt-5 sm:text-lg">
+        Scan the QR code, pick any group, filter by date and save every message, photo and video — with a ready-to-use Excel file.
+      </p>
+
+      <ol class="mt-6 grid max-w-xl gap-2.5 sm:mt-8 sm:gap-3">
+        <li class="spotlight flex items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-white/20 sm:gap-4 sm:p-4">
+          <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-wa/15 font-display text-sm font-bold text-wa ring-1 ring-wa/30 sm:size-10">01</span>
+          <span class="text-sm text-slate-300 sm:text-base">Open <b class="font-semibold text-white">WhatsApp</b> on your phone</span>
+        </li>
+        <li class="spotlight flex items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-white/20 sm:gap-4 sm:p-4">
+          <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-cyan/15 font-display text-sm font-bold text-neon-cyan ring-1 ring-neon-cyan/30 sm:size-10">02</span>
+          <span class="text-sm text-slate-300 sm:text-base">Tap <b class="font-semibold text-white">Menu ⋮</b> or <b class="font-semibold text-white">Settings</b>, then <b class="font-semibold text-white">Linked devices</b></span>
+        </li>
+        <li class="spotlight flex items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-white/20 sm:gap-4 sm:p-4">
+          <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-violet/15 font-display text-sm font-bold text-violet-300 ring-1 ring-neon-violet/30 sm:size-10">03</span>
+          <span class="text-sm text-slate-300 sm:text-base">Tap <b class="font-semibold text-white">Link a device</b></span>
+        </li>
+        <li class="spotlight flex items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3 transition hover:border-white/20 sm:gap-4 sm:p-4">
+          <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-pink/15 font-display text-sm font-bold text-pink-300 ring-1 ring-neon-pink/30 sm:size-10">04</span>
+          <span class="text-sm text-slate-300 sm:text-base">Point your phone at the QR code to scan it</span>
+        </li>
+      </ol>
+
+      <div class="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-400 max-sm:hidden">
+        <span class="inline-flex items-center gap-2"><svg class="size-4 text-wa" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 9.6 8 11 4.6-1.4 8-6 8-11V5l-8-3Z"/></svg>Never uploaded</span>
+        <span class="inline-flex items-center gap-2"><svg class="size-4 text-neon-cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Date-wise filters</span>
+        <span class="inline-flex items-center gap-2"><svg class="size-4 text-violet-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>Photos &amp; videos</span>
+      </div>
+    </div>
+
+    <div class="flex justify-center animate-rise [animation-delay:150ms] max-lg:order-first">
+      <div id="loginCard" class="tilt relative w-full max-w-md rounded-[28px] border border-white/10 bg-ink-2 p-5 shadow-[0_30px_80px_-30px_rgb(0_0_0/0.9)] sm:p-8">
+        <div class="mb-5 flex items-center justify-between gap-4 sm:mb-6">
+          <div>
+            <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Link a device</p>
+            <h2 class="mt-1 font-display text-xl font-semibold sm:text-2xl">Scan to connect</h2>
+          </div>
+          <span class="shrink-0 rounded-full border border-wa/30 bg-wa/10 px-3 py-1 text-xs font-semibold text-wa max-sm:hidden">WhatsApp Web</span>
+        </div>
+
+        <div class="[perspective:1000px]">
+          <div id="qrFlip" class="flip relative mx-auto aspect-square w-full max-w-[280px] sm:max-w-[300px]">
+            <div class="face absolute inset-0">
+              <div id="qrFrame" class="ring-glow relative grid size-full place-items-center rounded-3xl bg-white p-3.5 sm:p-4 [&.demo]:cursor-pointer">
+                <img id="qrImg" class="size-full rounded-xl [image-rendering:pixelated]" alt="WhatsApp login QR code" hidden>
+                <div class="scanline" aria-hidden="true"></div>
+                <div id="qrLoader" class="grid place-items-center gap-4 px-4 text-center text-slate-500">
+                  <div class="size-12 animate-spin rounded-full border-4 border-slate-200 border-t-wa border-r-neon-cyan"></div>
+                  <p id="qrLoaderText" class="max-w-[210px] text-sm">Preparing QR code…</p>
+                </div>
+              </div>
+            </div>
+            <div class="face face-back absolute inset-0 grid place-items-center rounded-3xl border border-wa/40 bg-emerald-950 p-5 text-center sm:p-6">
+              <div class="w-full">
+                <div class="mx-auto grid size-16 animate-pop place-items-center rounded-full bg-wa text-3xl font-bold text-white [animation-delay:400ms] sm:size-20 sm:text-4xl">✓</div>
+                <h3 class="mt-4 font-display text-2xl font-bold sm:mt-5">Linked!</h3>
+                <p id="syncText" class="mt-1 text-sm text-emerald-100/80">Syncing your chats…</p>
+                <div class="mx-auto mt-4 h-2 w-4/5 overflow-hidden rounded-full bg-black/30 sm:mt-5">
+                  <i id="syncBar" class="block h-full w-[5%] rounded-full bg-gradient-to-r from-wa to-neon-cyan transition-[width] duration-500"></i>
+                </div>
+                <p id="syncElapsed" class="mt-2 text-xs tabular-nums text-emerald-100/60"></p>
+                <p class="mx-auto mt-2 max-w-[230px] text-xs leading-relaxed text-emerald-100/70 sm:mt-3">Keep WhatsApp open on your phone until this finishes — it makes the sync faster.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p id="qrHint" class="mt-5 text-center text-sm text-slate-400 sm:mt-6">The QR code refreshes automatically — keep this page open</p>
+        <div class="mt-4 flex flex-col items-center gap-3">
+          <div id="statusPill" data-state="starting" role="status" aria-live="polite" class="group inline-flex max-w-full items-center gap-2.5 rounded-full border border-white/10 bg-black/40 px-4 py-2 text-sm text-slate-200">
+            <span class="relative flex size-2.5 shrink-0">
+              <span class="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-70 group-data-[state=qr]:bg-wa group-data-[state=loading]:bg-neon-cyan group-data-[state=authenticated]:bg-neon-cyan group-data-[state=error]:hidden group-data-[state=disconnected]:hidden"></span>
+              <span class="relative inline-flex size-2.5 rounded-full bg-amber-400 group-data-[state=qr]:bg-wa group-data-[state=loading]:bg-neon-cyan group-data-[state=authenticated]:bg-neon-cyan group-data-[state=error]:bg-rose-500 group-data-[state=disconnected]:bg-rose-500"></span>
+            </span>
+            <span id="statusText">Connecting…</span>
+          </div>
+          <button id="retryBtn" hidden class="h-11 rounded-xl border border-white/15 bg-white/10 px-5 text-sm font-semibold transition hover:bg-white/15 active:scale-95">Retry</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= APP (WhatsApp Web style) ================= -->
+  <section id="app" hidden class="md:p-4 lg:p-6">
+    <div id="shell" class="animate-shell mx-auto grid h-full max-w-[1600px] overflow-hidden border-white/10 bg-ink-2 md:grid-cols-[300px_minmax(0,1fr)] md:rounded-3xl md:border lg:grid-cols-[340px_minmax(0,1fr)] xl:grid-cols-[370px_minmax(0,1fr)]">
+
+      <!-- sidebar -->
+      <aside class="sidebar flex min-h-0 flex-col border-white/10 bg-black/20 md:border-r">
+        <div class="flex items-center gap-3 border-b border-white/10 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:py-3.5">
+          <div id="meAvatar" class="avatar grid size-10 shrink-0 place-items-center rounded-full font-display text-sm font-bold text-white md:size-11">Y</div>
+          <div class="min-w-0 flex-1">
+            <p id="meName" class="truncate font-display font-semibold">You</p>
+            <p id="meNumber" class="truncate text-xs text-slate-400"></p>
+          </div>
+          <button id="refreshBtn" title="Refresh chat list" aria-label="Refresh chat list" class="group grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white active:scale-95">
+            <svg class="size-[18px] group-[.spinning]:animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+          </button>
+          <button id="logoutBtn" title="Log out" aria-label="Log out" class="grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-500/15 hover:text-rose-200 active:scale-95">
+            <svg class="size-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></svg>
+          </button>
+        </div>
+
+        <div class="px-3 pt-3 md:px-4 md:pt-4">
+          <label class="flex h-11 items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3.5 transition focus-within:border-neon-cyan/60 focus-within:ring-4 focus-within:ring-neon-cyan/10">
+            <svg class="size-[18px] shrink-0 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input id="search" type="search" placeholder="Search groups…" autocomplete="off" enterkeyhint="search" class="h-full min-w-0 flex-1 appearance-none bg-transparent text-base outline-none placeholder:text-slate-500 md:text-sm">
+          </label>
+        </div>
+
+        <div class="flex gap-2 px-3 py-3 md:px-4" role="tablist">
+          <button data-tab="groups" data-active role="tab" class="tab group flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 px-3 text-sm font-medium text-slate-400 transition hover:text-white data-active:border-transparent data-active:bg-white data-active:text-ink">
+            Groups <span id="groupCount" class="rounded-md bg-white/10 px-1.5 py-0.5 text-[11px] group-data-active:bg-ink/10">0</span>
+          </button>
+          <button data-tab="all" role="tab" class="tab group flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 px-3 text-sm font-medium text-slate-400 transition hover:text-white data-active:border-transparent data-active:bg-white data-active:text-ink">
+            All chats <span id="allCount" class="rounded-md bg-white/10 px-1.5 py-0.5 text-[11px] group-data-active:bg-ink/10">0</span>
+          </button>
+        </div>
+
+        <ul id="chatList" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(1rem+env(safe-area-inset-bottom))]"></ul>
+      </aside>
+
+      <!-- main panel -->
+      <main class="panel relative flex min-h-0 min-w-0 flex-col">
+        <div id="emptyState" class="flex flex-1 flex-col items-center justify-center p-8 text-center">
+          <div class="relative grid size-32 animate-float place-items-center">
+            <div class="grid size-28 rotate-6 place-items-center rounded-[32px] border border-white/15 bg-white/[0.06] shadow-2xl">
+              <svg class="size-14 text-wa" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M32 10a22 22 0 0 0-19 33l-3 11 11.3-3A22 22 0 1 0 32 10Z"/><path d="M24 26h16M24 33h16M24 40h9"/></svg>
+            </div>
+          </div>
+          <h2 class="mt-8 font-display text-3xl font-bold tracking-tight">Select a group</h2>
+          <p class="mt-3 max-w-md leading-relaxed text-slate-400">Choose any group on the left to see its messages, photos and videos with <b class="text-slate-200">date</b>, <b class="text-slate-200">time</b> and <b class="text-slate-200">sender</b> — then export everything.</p>
+          <div class="mt-8 grid w-full max-w-lg grid-cols-3 gap-3 text-xs text-slate-400">
+            <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p class="font-display text-lg font-bold text-white">01</p>Pick a group</div>
+            <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p class="font-display text-lg font-bold text-white">02</p>Choose dates</div>
+            <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p class="font-display text-lg font-bold text-white">03</p>Export all</div>
+          </div>
+        </div>
+
+        <div id="conversation" hidden class="flex min-h-0 flex-1 flex-col">
+          <!-- header: one row on phones; export actions join it on desktop -->
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2.5 border-b border-white/10 bg-white/[0.02] px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] lg:order-1 lg:px-5 lg:py-3">
+            <button id="backBtn" aria-label="Back to chats" class="grid size-10 shrink-0 place-items-center rounded-full text-slate-200 transition active:bg-white/10 md:hidden">
+              <svg class="size-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+            </button>
+            <div id="convAvatar" class="avatar grid size-10 shrink-0 place-items-center rounded-full font-display text-sm font-bold text-white lg:size-11"></div>
+            <div class="min-w-0 flex-1">
+              <p id="convName" class="truncate font-display text-base font-semibold lg:text-lg"></p>
+              <p id="convMeta" class="truncate text-xs text-slate-400"></p>
+            </div>
+            <div class="flex shrink-0 rounded-xl border border-white/10 bg-black/30 p-1" role="tablist" aria-label="View">
+              <button data-view="chat" data-active class="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-slate-400 transition hover:text-white data-active:bg-white data-active:text-ink lg:px-3 lg:text-sm">Chat</button>
+              <button data-view="table" class="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-slate-400 transition hover:text-white data-active:bg-white data-active:text-ink lg:px-3 lg:text-sm">Table</button>
+            </div>
+            <div class="flex w-full items-center gap-2 max-lg:hidden xl:w-auto">
+              <label title="Also include every photo, video, voice note and document" class="flex h-11 shrink-0 cursor-pointer select-none items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-slate-300 transition hover:border-white/20">
+                <input id="mediaToggle" type="checkbox" class="peer sr-only" checked>
+                <span class="relative h-5 w-9 rounded-full bg-white/15 transition after:absolute after:left-0.5 after:top-0.5 after:size-4 after:rounded-full after:bg-white after:transition peer-checked:bg-wa peer-checked:after:translate-x-4 peer-focus-visible:ring-2 peer-focus-visible:ring-neon-cyan"></span>
+                Photos &amp; videos
+              </label>
+              <button id="exportBtn" class="magnetic group relative inline-flex h-11 flex-1 items-center justify-center gap-2 overflow-hidden rounded-xl bg-gradient-to-r from-wa to-neon-cyan px-4 text-sm font-semibold text-ink shadow-[0_12px_30px_-12px_rgb(37_211_102/0.8)] transition-shadow hover:shadow-[0_16px_40px_-10px_rgb(34_211_238/0.8)] disabled:cursor-progress disabled:opacity-80 xl:flex-none">
+                <span class="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/50 to-transparent transition-transform duration-700 group-hover:translate-x-full"></span>
+                <svg class="relative size-[18px] shrink-0 group-[.working]:animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+                <span id="exportLabel" class="relative whitespace-nowrap">Download ZIP</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- phones: filters button + stats summary in one slim row; desktop: stats line under the filters -->
+          <div class="flex items-center gap-2 border-b border-white/10 px-2 py-2 lg:order-3 lg:border-0 lg:px-5 lg:pb-3 lg:pt-0 xl:hidden">
+            <button id="filtersBtn" type="button" aria-expanded="false" aria-controls="filters" class="group flex h-9 max-w-[52%] shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[13px] font-medium text-slate-200 transition active:bg-white/10 aria-expanded:border-neon-cyan/50 aria-expanded:bg-neon-cyan/10 lg:hidden">
+              <svg class="size-4 shrink-0 text-neon-cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+              <span id="filtersSummary" class="truncate">Last 1,000</span>
+              <svg class="size-3.5 shrink-0 opacity-60 transition group-aria-expanded:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <p id="statsLine" class="min-w-0 flex-1 truncate text-xs text-slate-400"></p>
+          </div>
+
+          <!-- filters (collapsed behind the Filters button on phones) -->
+          <div id="filters" class="border-b border-white/10 pb-3 lg:order-2 lg:border-0 lg:pb-0">
+            <div class="grid grid-cols-2 items-end gap-2.5 px-3 pt-3 lg:flex lg:flex-wrap lg:gap-3 lg:px-5">
+              <label class="flex min-w-0 flex-col gap-1.5">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">From</span>
+                <input type="date" id="fromDate" class="h-11 w-full min-w-0 appearance-none rounded-xl border border-white/10 bg-white/5 px-3 text-base outline-none transition focus:border-neon-cyan/60 focus:ring-4 focus:ring-neon-cyan/10 lg:h-10 lg:w-40 lg:text-sm [&::-webkit-date-and-time-value]:text-left">
+              </label>
+              <label class="flex min-w-0 flex-col gap-1.5">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">To</span>
+                <input type="date" id="toDate" class="h-11 w-full min-w-0 appearance-none rounded-xl border border-white/10 bg-white/5 px-3 text-base outline-none transition focus:border-neon-cyan/60 focus:ring-4 focus:ring-neon-cyan/10 lg:h-10 lg:w-40 lg:text-sm [&::-webkit-date-and-time-value]:text-left">
+              </label>
+              <label class="flex min-w-0 flex-col gap-1.5">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Messages</span>
+                <span class="relative">
+                  <select id="limitSel" class="h-11 w-full appearance-none rounded-xl border border-white/10 bg-white/5 pl-3 pr-9 text-base outline-none transition focus:border-neon-cyan/60 focus:ring-4 focus:ring-neon-cyan/10 disabled:opacity-40 lg:h-10 lg:w-40 lg:text-sm [&>option]:bg-ink-2">
+                    <option value="500">Last 500</option>
+                    <option value="1000" selected>Last 1,000</option>
+                    <option value="5000">Last 5,000</option>
+                    <option value="20000">Last 20,000</option>
+                    <option value="all">All available</option>
+                  </select>
+                  <svg class="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </span>
+              </label>
+              <button id="loadBtn" class="magnetic group inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 text-sm font-semibold transition hover:bg-white/15 active:scale-[0.98] disabled:cursor-progress disabled:opacity-60 lg:order-last lg:h-10">
+                <svg class="size-4 group-[.working]:animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+                Load
+              </button>
+              <div id="chips" class="col-span-2 -mx-3 flex items-center gap-1.5 overflow-x-auto px-3 pb-0.5 [scrollbar-width:none] lg:mx-0 lg:min-h-10 lg:flex-[1_1_320px] lg:flex-wrap lg:overflow-visible lg:px-0 [&::-webkit-scrollbar]:hidden">
+                <button data-range="today" class="h-9 shrink-0 rounded-full border border-white/10 bg-white/5 px-3.5 text-[13px] font-medium text-slate-300 transition hover:border-white/25 hover:text-white data-active:border-transparent data-active:bg-gradient-to-r data-active:from-wa data-active:to-neon-cyan data-active:text-ink lg:h-8 lg:px-3 lg:text-xs">Today</button>
+                <button data-range="7" class="h-9 shrink-0 rounded-full border border-white/10 bg-white/5 px-3.5 text-[13px] font-medium text-slate-300 transition hover:border-white/25 hover:text-white data-active:border-transparent data-active:bg-gradient-to-r data-active:from-wa data-active:to-neon-cyan data-active:text-ink lg:h-8 lg:px-3 lg:text-xs">7 days</button>
+                <button data-range="30" class="h-9 shrink-0 rounded-full border border-white/10 bg-white/5 px-3.5 text-[13px] font-medium text-slate-300 transition hover:border-white/25 hover:text-white data-active:border-transparent data-active:bg-gradient-to-r data-active:from-wa data-active:to-neon-cyan data-active:text-ink lg:h-8 lg:px-3 lg:text-xs">30 days</button>
+                <button data-range="month" class="h-9 shrink-0 rounded-full border border-white/10 bg-white/5 px-3.5 text-[13px] font-medium text-slate-300 transition hover:border-white/25 hover:text-white data-active:border-transparent data-active:bg-gradient-to-r data-active:from-wa data-active:to-neon-cyan data-active:text-ink lg:h-8 lg:px-3 lg:text-xs">This month</button>
+                <button data-range="clear" class="h-9 shrink-0 rounded-full px-3 text-[13px] font-medium text-slate-400 transition hover:text-white lg:h-8 lg:text-xs">Clear</button>
+              </div>
+            </div>
+            <p id="filterNote" class="min-h-4 px-5 pt-2 text-xs text-slate-500 max-lg:hidden"></p>
+          </div>
+
+          <!-- stats cards (wide screens) -->
+          <div class="hidden gap-2.5 px-5 pb-3 pt-2.5 lg:order-4 xl:grid xl:grid-cols-5">
+            <div class="spotlight tilt-sm tilt overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div class="mb-2 h-1 w-8 rounded-full bg-gradient-to-r from-wa to-emerald-300"></div>
+              <p id="stTotal" class="truncate font-display text-xl font-bold">—</p>
+              <p class="truncate text-[11px] font-medium uppercase tracking-wider text-slate-500">Messages</p>
+            </div>
+            <div class="spotlight tilt-sm tilt overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div class="mb-2 h-1 w-8 rounded-full bg-gradient-to-r from-amber-400 to-yellow-200"></div>
+              <p id="stMedia" class="truncate font-display text-xl font-bold">—</p>
+              <p class="truncate text-[11px] font-medium uppercase tracking-wider text-slate-500">Photos &amp; videos</p>
+            </div>
+            <div class="spotlight tilt-sm tilt overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div class="mb-2 h-1 w-8 rounded-full bg-gradient-to-r from-neon-cyan to-sky-300"></div>
+              <p id="stMembers" class="truncate font-display text-xl font-bold">—</p>
+              <p class="truncate text-[11px] font-medium uppercase tracking-wider text-slate-500">Active members</p>
+            </div>
+            <div class="spotlight tilt-sm tilt overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div class="mb-2 h-1 w-8 rounded-full bg-gradient-to-r from-neon-violet to-violet-300"></div>
+              <p id="stFirst" class="truncate font-display text-xl font-bold">—</p>
+              <p class="truncate text-[11px] font-medium uppercase tracking-wider text-slate-500">First message</p>
+            </div>
+            <div class="spotlight tilt-sm tilt overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div class="mb-2 h-1 w-8 rounded-full bg-gradient-to-r from-neon-pink to-pink-300"></div>
+              <p id="stLast" class="truncate font-display text-xl font-bold">—</p>
+              <p class="truncate text-[11px] font-medium uppercase tracking-wider text-slate-500">Last message</p>
+            </div>
+          </div>
+
+          <!-- messages -->
+          <div class="relative min-h-0 flex-1 overflow-hidden lg:order-5 lg:mx-5 lg:mb-5 lg:rounded-2xl lg:border lg:border-white/10">
+            <div id="chatView" class="wallpaper absolute inset-0 overflow-y-auto overscroll-contain px-2.5 pb-[calc(5.5rem+env(safe-area-inset-bottom))] pt-3 sm:px-[5%] lg:pb-4"></div>
+            <div id="datePill" aria-hidden="true" class="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-full border border-white/10 bg-ink-2/95 px-3.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-200 opacity-0 shadow-lg transition-opacity duration-300"></div>
+            <div id="tableView" hidden class="absolute inset-0 overflow-auto overscroll-contain bg-ink pb-[calc(5.5rem+env(safe-area-inset-bottom))] lg:pb-0">
+              <table class="w-full border-separate border-spacing-0 text-sm">
+                <thead>
+                  <tr class="[&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:border-b [&>th]:border-white/10 [&>th]:bg-ink-2 [&>th]:px-3 [&>th]:py-3 [&>th]:text-left [&>th]:text-[11px] [&>th]:font-semibold [&>th]:uppercase [&>th]:tracking-wider [&>th]:whitespace-nowrap [&>th]:text-slate-400">
+                    <th>#</th><th>Date</th><th>Time</th><th>Day</th><th>Sender</th><th>Phone</th><th>Message</th><th>Type</th>
+                  </tr>
+                </thead>
+                <tbody id="tableBody"></tbody>
+              </table>
+            </div>
+            <div id="busy" hidden class="absolute inset-0 z-20 grid place-items-center bg-ink/70">
+              <div class="flex flex-col items-center gap-4 px-6 text-center">
+                <div class="size-14 animate-spin rounded-full border-4 border-white/10 border-t-wa border-r-neon-cyan"></div>
+                <p id="busyText" class="text-sm font-medium text-slate-200">Fetching messages…</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- phones: floating export button -->
+          <button id="fab" type="button" aria-label="Export this chat" class="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 z-30 flex h-14 items-center gap-2 rounded-full bg-gradient-to-r from-wa to-neon-cyan pl-4 pr-5 text-[15px] font-semibold text-ink shadow-[0_14px_34px_-8px_rgb(37_211_102/0.75)] transition active:scale-95 disabled:opacity-70 lg:hidden">
+            <svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+            Export
+          </button>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <!-- ================= export sheet (phones) ================= -->
+  <div id="exportSheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle" class="fixed inset-0 z-[75]">
+    <div data-close class="absolute inset-0 bg-black/60"></div>
+    <div class="animate-sheet absolute inset-x-0 bottom-0 rounded-t-[28px] border-t border-white/10 bg-ink-2 px-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-3 shadow-2xl">
+      <div class="mx-auto mb-4 h-1.5 w-10 rounded-full bg-white/20"></div>
+      <p class="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Export</p>
+      <h3 id="sheetTitle" class="mt-1 truncate font-display text-xl font-semibold"></h3>
+      <p id="sheetSummary" class="mt-1 text-sm text-slate-400"></p>
+      <label class="mt-5 flex cursor-pointer items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+        <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-amber-400/15 text-xl">🖼️</span>
+        <span class="min-w-0 flex-1">
+          <span class="block font-medium">Include photos &amp; videos</span>
+          <span class="block text-xs text-slate-400">Adds voice notes and documents too</span>
+        </span>
+        <input id="sheetMediaToggle" type="checkbox" class="peer sr-only" checked>
+        <span class="relative h-7 w-12 shrink-0 rounded-full bg-white/15 transition after:absolute after:left-1 after:top-1 after:size-5 after:rounded-full after:bg-white after:transition peer-checked:bg-wa peer-checked:after:translate-x-5"></span>
+      </label>
+      <button id="sheetExportBtn" class="mt-4 flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-wa to-neon-cyan text-base font-semibold text-ink transition active:scale-[0.98]">
+        <svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        <span id="sheetExportLabel">Download ZIP</span>
+      </button>
+      <button data-close class="mt-2 h-12 w-full rounded-2xl text-sm font-medium text-slate-400 transition active:bg-white/5">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ================= media viewer ================= -->
+  <div id="viewer" hidden role="dialog" aria-modal="true" aria-label="Media viewer" class="fixed inset-0 z-[80] flex flex-col bg-black">
+    <div class="flex items-center gap-2 border-b border-white/10 px-3 pb-2.5 pt-[max(0.625rem,env(safe-area-inset-top))] sm:gap-3 sm:px-5">
+      <div class="min-w-0 flex-1">
+        <p id="viewerTitle" class="truncate text-sm font-semibold"></p>
+        <p id="viewerSub" class="truncate text-xs text-slate-400"></p>
+      </div>
+      <a id="viewerDownload" href="#" aria-label="Download" class="inline-flex h-10 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 text-sm font-medium transition hover:bg-white/15">
+        <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        <span class="max-sm:hidden">Download</span>
+      </a>
+      <button id="viewerClose" aria-label="Close" class="grid size-10 place-items-center rounded-xl border border-white/15 bg-white/10 transition hover:bg-white/15">
+        <svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div id="viewerBody" class="relative flex min-h-0 flex-1 items-center justify-center p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-6"></div>
+  </div>
+
+  <!-- ================= export progress ================= -->
+  <div id="exportPanel" hidden class="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[65] rounded-2xl border border-white/10 bg-ink-2 p-4 shadow-2xl shadow-black/60 sm:inset-x-auto sm:bottom-5 sm:right-5 sm:w-[400px]">
+    <div class="flex items-start gap-3">
+      <div id="exportSpinner" class="mt-0.5 size-8 shrink-0 animate-spin rounded-full border-[3px] border-white/10 border-t-wa border-r-neon-cyan"></div>
+      <div id="exportCheck" hidden class="mt-0.5 grid size-8 shrink-0 place-items-center rounded-full bg-wa text-base font-bold text-ink">✓</div>
+      <div class="min-w-0 flex-1">
+        <p id="exportTitle" class="font-semibold">Exporting…</p>
+        <p id="exportDetail" class="mt-0.5 break-words text-xs leading-relaxed text-slate-400"></p>
+      </div>
+      <button id="exportClose" hidden aria-label="Close" class="grid size-9 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-white/10 hover:text-white">
+        <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div class="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+      <i id="exportBar" class="block h-full w-0 rounded-full bg-gradient-to-r from-wa to-neon-cyan transition-[width] duration-300"></i>
+    </div>
+    <button id="downloadAgainBtn" hidden class="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-white text-sm font-semibold text-ink transition hover:bg-slate-200 active:scale-[0.98]">
+      <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      Download again
+    </button>
+  </div>
+
+  <div id="toasts" aria-live="polite" class="fixed inset-x-3 top-[max(0.75rem,env(safe-area-inset-top))] z-[70] flex flex-col gap-2.5 sm:inset-x-auto sm:right-5 sm:top-5 sm:w-[400px]"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

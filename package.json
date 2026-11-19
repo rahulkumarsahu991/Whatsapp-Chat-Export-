@@ -1,0 +1,29 @@
+{
+  "name": "whatsapp-chat-exporter-3d",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3D classical WhatsApp Web-style exporter: scan the QR, pick a group, export its chats to Excel.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node server.js --demo",
+    "build:css": "tailwindcss -i styles/app.css -o public/css/app.css --minify",
+    "watch:css": "tailwindcss -i styles/app.css -o public/css/app.css --watch"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "archiver": "^5.3.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.35.5",
+    "socket.io": "^4.8.4",
+    "whatsapp-web.js": "^1.34.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
+    "tailwindcss": "^4.3.5"
+  }
+}

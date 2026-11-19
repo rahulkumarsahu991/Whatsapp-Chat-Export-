@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhatsApp Chat Exporter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <!-- Same Tailwind build as the app. Open this file directly; it jumps to the live app once start.bat is running. -->
+  <link rel="stylesheet" href="public/css/app.css">
+</head>
+<body class="min-h-full overflow-x-hidden bg-ink font-sans text-slate-100 antialiased">
+  <main class="relative mx-auto grid min-h-dvh max-w-6xl items-center gap-10 px-4 py-10 sm:gap-14 sm:px-8 sm:py-14 lg:grid-cols-[1.1fr_1fr]">
+    <div class="animate-rise">
+      <div class="mb-7 inline-flex items-center gap-2.5 rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs font-medium text-slate-300 backdrop-blur">
+        <span class="relative flex size-2"><span class="absolute inline-flex size-full animate-ping rounded-full bg-wa opacity-75"></span><span class="relative inline-flex size-2 rounded-full bg-wa"></span></span>
+        Runs 100% on this computer
+      </div>
+      <h1 class="font-display text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl">
+        Export WhatsApp<br><span class="text-gradient">chats &amp; media.</span>
+      </h1>
+      <p class="mt-5 max-w-xl text-base leading-relaxed text-slate-400 sm:text-lg">Scan the QR code, pick any group, filter by date and save every message, photo and video with a clean Excel file.</p>
+
+      <div id="status" class="group mt-8 inline-flex items-center gap-2.5 rounded-full border border-white/10 bg-black/40 px-4 py-2 text-sm" role="status" aria-live="polite">
+        <span class="relative flex size-2.5">
+          <span class="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-70 group-data-ok:bg-wa"></span>
+          <span class="relative inline-flex size-2.5 rounded-full bg-amber-400 group-data-ok:bg-wa"></span>
+        </span>
+        <span id="statusText">Looking for the exporter on this computer…</span>
+      </div>
+    </div>
+
+    <!-- CSS-only 3D card stack -->
+    <div class="flex justify-center [perspective:1200px] animate-rise [animation-delay:150ms]">
+      <div id="card" class="tilt relative w-full max-w-md rounded-[28px] border border-white/10 bg-ink-2 p-6 shadow-[0_30px_80px_-30px_rgb(0_0_0/0.9)] sm:p-8">
+
+        <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Get started</p>
+        <h2 class="mt-1 font-display text-2xl font-semibold">Start the exporter</h2>
+        <ol class="mt-6 grid gap-3">
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-wa/15 font-display text-sm font-bold text-wa ring-1 ring-wa/30">01</span>
+            <span class="text-sm text-slate-300">Double-click <code class="rounded-md bg-white/10 px-1.5 py-0.5 font-semibold text-white">start.bat</code> in this folder. Keep the black window open.</span>
+          </li>
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-cyan/15 font-display text-sm font-bold text-neon-cyan ring-1 ring-neon-cyan/30">02</span>
+            <span class="text-sm text-slate-300">The app opens at <b class="text-white">localhost:3000</b>. This page jumps there by itself.</span>
+          </li>
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-violet/15 font-display text-sm font-bold text-violet-300 ring-1 ring-neon-violet/30">03</span>
+            <span class="text-sm text-slate-300">Scan the QR in WhatsApp → <b class="text-white">Linked devices</b>, pick a group, press <b class="text-white">Export to Excel</b>.</span>
+          </li>
+        </ol>
+        <div class="mt-6 flex flex-wrap gap-3">
+          <a href="http://localhost:3000" class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-wa to-neon-cyan px-5 py-2.5 text-sm font-semibold text-ink shadow-[0_12px_30px_-10px_rgb(37_211_102/0.8)] transition hover:-translate-y-0.5">Open the website</a>
+          <button id="retryBtn" type="button" class="rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-sm font-semibold transition hover:bg-white/15">Check again</button>
+        </div>
+        <p class="mt-5 text-xs text-slate-500">No login? Double-click <code class="rounded bg-white/10 px-1 text-slate-300">start-demo.bat</code> to try it with sample groups.</p>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const APP_URL = 'http://localhost:3000/';
+    const statusEl = document.getElementById('status');
+    const statusText = document.getElementById('statusText');
+    let timer = null;
+
+    async function check() {
+      try {
+        // "no-cors" lets this local file detect the server without reading anything from it.
+        await fetch(APP_URL + 'api/status', { mode: 'no-cors', cache: 'no-store' });
+        statusEl.toggleAttribute('data-ok', true);
+        statusText.textContent = 'Exporter is running. Opening the website…';
+        setTimeout(() => { location.href = APP_URL; }, 700);
+        return true;
+      } catch {
+        statusEl.toggleAttribute('data-ok', false);
+        statusText.textContent = 'Not running yet. Double-click start.bat in this folder.';
+        return false;
+      }
+    }
+    async function loop() { if (!(await check())) timer = setTimeout(loop, 3000); }
+    document.getElementById('retryBtn').addEventListener('click', () => { clearTimeout(timer); loop(); });
+    loop();
+
+    const card = document.getElementById('card');
+    if (matchMedia('(hover: hover)').matches) {
+      card.addEventListener('pointermove', (e) => {
+        const r = card.getBoundingClientRect();
+        card.style.setProperty('--ry', `${((e.clientX - r.left) / r.width - 0.5) * 10}deg`);
+        card.style.setProperty('--rx', `${-((e.clientY - r.top) / r.height - 0.5) * 10}deg`);
+      });
+      card.addEventListener('pointerleave', () => { card.style.setProperty('--rx', '0deg'); card.style.setProperty('--ry', '0deg'); });
+    }
+  </script>
+</body>
+</html>

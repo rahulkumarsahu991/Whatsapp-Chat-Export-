@@ -1,0 +1,20 @@
+# dependencies (run `npm install` / start.bat to get them)
+node_modules/
+
+# WhatsApp login data and caches — never commit these (the app keeps them in %LOCALAPPDATA%,
+# these entries are just a safety net)
+.wwebjs_auth/
+.wwebjs_cache/
+session-*/
+media-cache/
+browser-cache/
+people-cache.json
+
+# exports and local tool settings
+*.xlsx
+*.zip
+*.log
+.claude/
+.vscode/
+.DS_Store
+Thumbs.db
