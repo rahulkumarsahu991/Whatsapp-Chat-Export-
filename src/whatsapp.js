@@ -662,12 +662,16 @@ class WhatsAppService extends EventEmitter {
 
     return this.run(async () => {
       this.ensureReady();
+      const t0 = Date.now();
       const chat = await this.client.getChatById(chatId);
+      const t1 = Date.now();
       const raw = await this.loadRaw(chat, params);
+      const t2 = Date.now();
       const msgs = raw
         .filter((m) => !SYSTEM_TYPES.has(m.type) && inRange(m.timestamp, params))
         .sort((a, b) => a.timestamp - b.timestamp);
       await this.resolvePeople(msgs);
+      console.log(`[messages] ${msgs.length} in ${Date.now() - t0} ms (chat ${t1 - t0}, history ${t2 - t1}, names ${Date.now() - t2})`);
       for (const m of msgs) if (m.hasMedia) this.msgRefs.set(m.id._serialized, m);
       while (this.msgRefs.size > MAX_MSG_REFS) this.msgRefs.delete(this.msgRefs.keys().next().value);
 
@@ -732,8 +736,40 @@ class WhatsAppService extends EventEmitter {
       if (n) notify.set(id, n);
       else if (!notify.has(id)) notify.set(id, '');
     }
-    const unknown = [...notify.keys()].filter((id) => !this.people.has(id));
+    let unknown = [...notify.keys()].filter((id) => !this.people.has(id));
     if (!unknown.length) return;
+
+    // Fast path: names and numbers WhatsApp Web already has in memory, read in ONE call
+    // (looking contacts up one by one took several seconds in big groups).
+    let known = {};
+    try {
+      known = await this.client.pupPage.evaluate((ids) => {
+        const C = window.require('WAWebCollections');
+        const sid = (w) => (w ? (w._serialized || (typeof w === 'string' ? w : String(w))) : '');
+        const out = {};
+        for (const id of ids) {
+          try {
+            const c = C.Contact.get(id);
+            if (!c) continue;
+            out[id] = {
+              name: c.name || c.pushname || c.verifiedName || '',
+              pn: c.id && c.id.server === 'c.us' ? sid(c.id) : sid(c.phoneNumber),
+            };
+          } catch (e) { /* not in memory */ }
+        }
+        return out;
+      }, unknown);
+    } catch { /* WhatsApp Web internals changed: fall back to the slower lookups below */ }
+    const now0 = Date.now();
+    for (const id of unknown) {
+      const k = known[id];
+      const name = (k && k.name) || notify.get(id) || '';
+      const pnId = id.endsWith('@c.us') ? id : (k && /@c\.us$/.test(k.pn) ? k.pn : '');
+      if (!name || !pnId) continue; // missing something → full lookup below
+      this.people.set(id, { name, phone: `+${pnId.split('@')[0]}`, at: now0 });
+    }
+    unknown = unknown.filter((id) => !this.people.has(id));
+    if (!unknown.length) { this.savePeopleSoon(); return; }
 
     // Newer WhatsApp groups hide numbers behind "@lid" ids; ask for the real numbers (one call for all),
     // while the contact lookups below run at the same time.

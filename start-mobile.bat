@@ -8,7 +8,7 @@ if exist "%USERPROFILE%\WhatsAppChatExporter\node\node.exe" set "PATH=%USERPROFI
 node -v >nul 2>&1
 if errorlevel 1 goto nonode
 
-if not exist "node_modules\whatsapp-web.js" call :install
+if not exist "node_modules\compression" call :install
 if errorlevel 1 goto end
 
 rem Runs the exporter on this PC and opens it to your phone through a Google-protected ngrok link.

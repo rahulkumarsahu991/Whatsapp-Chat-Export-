@@ -55,6 +55,12 @@ Keep the black server window open while you use the site. Close it, or press `Ct
 
 Up to **3 guests** can be logged in at a time. Each one runs its own hidden Chrome, using about 300 MB of memory.
 
+Made fast for phones:
+- Data is compressed, about 10 times smaller.
+- Page files stay cached on the phone, so a repeat visit downloads only a small page.
+- A group shows its newest messages within a second or two, and older ones load in the background.
+- On the link, photos show as small previews that come in batches. Tap one to open the full photo.
+
 Good to know:
 - The link works only while this PC is on and `start-mobile.bat` is running.
 - The free ngrok plan allows about **1 GB of data and 20,000 requests a month**, shared by everyone who uses the link. Excel exports and chats are small, but ZIPs full of videos use that up quickly.

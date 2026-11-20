@@ -221,7 +221,7 @@ class DemoService extends EventEmitter {
 
   async getMessages(chatId, params) {
     this.ensureReady();
-    await wait(700);
+    await wait(params.limit === 'all' || params.limit > 200 ? 2500 : 700); // like WhatsApp: more history takes longer
     const g = this.groups.find((x) => x.info.id === chatId);
     if (!g) {
       const err = new Error('Demo mode only has sample messages for the groups.');

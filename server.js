@@ -10,9 +10,11 @@
 //                             (GUEST_IDLE_MIN), and when the app stops.
 
 const crypto = require('crypto');
+const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { exec } = require('child_process');
+const compression = require('compression');
 const express = require('express');
 const { Server } = require('socket.io');
 const { parseQuery } = require('./src/format');
@@ -167,7 +169,10 @@ app.use((req, res, next) => {
   if (req.method === 'POST' && req.get('X-App') !== '1') return res.status(403).json({ error: 'Forbidden' });
   next();
 });
-app.use(express.json({ limit: '10kb' }));
+// Page files and chat data go out compressed (5-8x smaller): what makes the shared link fast on phones.
+// (Photos, videos and ZIPs are already compressed and are sent as they are.)
+app.use(compression({ threshold: 1024 }));
+app.use(express.json({ limit: '64kb' }));
 
 // The owner's door on the shared link: ngrok asks for Google sign-in here first.
 app.get('/owner', (req, res) => {
@@ -187,7 +192,27 @@ app.get('/owner', (req, res) => {
   res.redirect('/');
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// The page asks for /css/app.css?v=… and /js/app.js?v=… (v changes whenever those files change), so
+// phones keep them cached and a repeat visit only downloads the small page itself.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+function assetVersion() {
+  const stamp = ['css/app.css', 'js/app.js']
+    .map((f) => { try { return fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs; } catch { return 0; } }).join('-');
+  return crypto.createHash('sha1').update(stamp).digest('hex').slice(0, 10);
+}
+app.get(['/', '/index.html'], (req, res) => {
+  const v = assetVersion();
+  const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    .replace('/css/app.css"', `/css/app.css?v=${v}"`)
+    .replace('/js/app.js"', `/js/app.js?v=${v}"`);
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(html);
+});
+app.use((req, res, next) => {
+  res.set('Cache-Control', req.query.v ? 'public, max-age=31536000, immutable' : 'no-cache');
+  next();
+});
+app.use(express.static(PUBLIC_DIR, { cacheControl: false, index: false }));
 
 const route = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => {
   console.error('[api]', err.message);
@@ -289,6 +314,19 @@ api.get('/media/:id/thumb', route(async (req, res) => {
   if (!thumb) return res.status(404).end();
   res.set('Cache-Control', 'private, max-age=86400');
   res.type(thumb.type).send(thumb.buffer);
+}));
+
+// Many previews in ONE request (one round trip instead of one per photo — much faster over the link).
+api.post('/thumbs', route(async (req, res) => {
+  const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids.slice(0, 300).map(String) : [];
+  const thumbs = {};
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const t = await req.s.wa.getThumb(id);
+      if (t) thumbs[id] = `data:${t.type};base64,${t.buffer.toString('base64')}`;
+    } catch { /* no preview for this one */ }
+  }));
+  res.json({ thumbs });
 }));
 
 api.get('/media/:id', route(async (req, res) => {

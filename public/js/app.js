@@ -54,6 +54,47 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 const fmtNum = (n) => Number(n || 0).toLocaleString('en-IN');
 const setActive = (el, on) => el.toggleAttribute('data-active', !!on);
 const mediaUrl = (id) => `/api/media/${encodeURIComponent(id)}`;
+// Opened through the shared link (phone / other device) rather than on the PC itself.
+const REMOTE = !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+
+/* ---- photo previews: fetched many at a time (one round trip per page, not one per photo) ---- */
+const thumbCache = new Map(); // message id -> data: URL
+const thumbQueue = new Set();
+let thumbBusy = false;
+
+function fillThumbs(root) {
+  for (const img of root.querySelectorAll('img[data-thumb]:not([src])')) {
+    const url = thumbCache.get(img.dataset.thumb);
+    if (url) img.src = url; else thumbQueue.add(img.dataset.thumb);
+  }
+  if (thumbQueue.size && !thumbBusy) flushThumbs();
+}
+
+async function flushThumbs() {
+  thumbBusy = true;
+  while (thumbQueue.size) {
+    const ids = [...thumbQueue].slice(0, 150);
+    ids.forEach((id) => thumbQueue.delete(id));
+    let thumbs = {};
+    try { thumbs = (await (await postJson('/api/thumbs', { ids })).json()).thumbs || {}; } catch { /* show icons */ }
+    for (const [id, url] of Object.entries(thumbs)) thumbCache.set(id, url);
+    while (thumbCache.size > 3000) thumbCache.delete(thumbCache.keys().next().value);
+    const asked = new Set(ids);
+    for (const img of document.querySelectorAll('img[data-thumb]:not([src])')) {
+      const id = img.dataset.thumb;
+      if (thumbs[id]) img.src = thumbs[id];
+      else if (asked.has(id)) img.replaceWith(mediaIcon());
+    }
+  }
+  thumbBusy = false;
+}
+
+function mediaIcon() {
+  const icon = document.createElement('span');
+  icon.className = 'grid size-full min-h-10 min-w-10 place-items-center text-3xl';
+  icon.textContent = '🖼️';
+  return icon;
+}
 const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* storage unavailable */ } },
@@ -481,18 +522,58 @@ async function loadMessages(fresh = false) {
   }
   const token = ++state.loadToken;
   setBusy(true, 'Fetching messages…');
+  const base = `/api/chats/${encodeURIComponent(chat.id)}/messages`;
+  const fetchData = async (qs) => (await api(`${base}?${qs}${fresh ? '&fresh=1' : ''}`)).json();
+  // Show the newest messages first (about 1-2 s), then load the rest of the period in the background
+  // (1,000 messages can take 10 s or more the first time). Only for the plain "last N messages" chat view.
+  const limit = els.limitSel.value;
+  const quick = state.view === 'chat' && !els.fromDate.value && !els.toDate.value && (limit === 'all' || Number(limit) > CHAT_PAGE);
+  let first = null;
   try {
-    const data = await (await api(`/api/chats/${encodeURIComponent(chat.id)}/messages?${queryString()}${fresh ? '&fresh=1' : ''}`)).json();
+    if (quick) {
+      first = await fetchData(`limit=${CHAT_PAGE}`);
+      if (token !== state.loadToken) return;
+      state.data = first;
+      renderMessages();
+      setBusy(false);
+      if (first.messages.length >= CHAT_PAGE) els.statsLine.textContent = 'Showing the newest messages · loading older ones…';
+      else return; // the chat has no more messages than that
+    }
+    const data = await fetchData(queryString());
     if (token !== state.loadToken) return;
-    state.data = data;
-    renderMessages();
+    if (first) mergeOlder(first, data); else { state.data = data; renderMessages(); }
   } catch (err) {
     if (token !== state.loadToken) return;
     toast(err.message, 'error');
-    els.chatView.innerHTML = `<div class="grid h-full place-items-center p-6 text-center text-slate-400">${esc(err.message)}</div>`;
+    if (first) renderStats(first.messages);
+    else els.chatView.innerHTML = `<div class="grid h-full place-items-center p-6 text-center text-slate-400">${esc(err.message)}</div>`;
   } finally {
     if (token === state.loadToken) setBusy(false);
   }
+}
+
+/** The full period arrived while the newest messages are on screen: add the older ones without a jump. */
+function mergeOlder(first, data) {
+  state.data = data;
+  const full = data.messages;
+  const shown = first.messages;
+  const extra = full.length - shown.length;
+  const sameTail = extra >= 0 && shown.length > 0 && full[full.length - 1].id === shown[shown.length - 1].id
+    && full[extra].id === shown[0].id;
+  if (state.view !== 'chat' || chatPaging.msgs !== shown || !sameTail) {
+    renderMessages(); // something changed meanwhile (new message, other view): just draw it again
+    return;
+  }
+  renderStats(full);
+  chatPaging.msgs = full;
+  chatPaging.start += extra;
+  if (chatPaging.start > 0 && !document.getElementById('chatTop')) {
+    const view = els.chatView;
+    const before = view.scrollHeight;
+    view.insertAdjacentHTML('afterbegin', TOP_LOADER);
+    view.scrollTop += view.scrollHeight - before;
+  }
+  fillChat();
 }
 
 function renderStats(msgs) {
@@ -517,12 +598,13 @@ function mediaHtml(m) {
     const box = sticker ? 'size-32 bg-transparent' : 'aspect-[4/3] w-72 max-w-full bg-black/40';
     const fit = sticker ? 'object-contain' : 'object-cover';
     let inner;
-    if (!PLAYABLE.has(m.type)) {
-      // Photos/stickers: the real image loads lazily, only when it scrolls into view.
+    if (!PLAYABLE.has(m.type) && (!REMOTE || !m.thumb)) {
+      // Photos/stickers on this PC: the real image loads lazily, only when it scrolls into view.
       inner = `<img src="${mediaUrl(m.id)}" loading="lazy" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
     } else if (m.thumb) {
-      // Videos: only the preview here; the video itself downloads when opened.
-      inner = `<img src="${mediaUrl(m.id)}/thumb" loading="lazy" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
+      // Videos (and photos on the shared link): only the small preview here, fetched in batches;
+      // the full file downloads when it is opened.
+      inner = `<img data-thumb="${id}" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
     } else {
       inner = `<span class="grid size-full place-items-center text-4xl">${TYPE_ICONS[m.type] || '📎'}</span>`;
     }
@@ -555,7 +637,7 @@ function tableBodyHtml(m) {
   if (m.type === 'revoked') return `<span class="italic text-slate-400">🚫 ${esc(m.text)}</span>`;
   if (VISUAL.has(m.type)) {
     const thumb = m.thumb
-      ? `<img src="${mediaUrl(m.id)}/thumb" loading="lazy" alt="" class="size-10 shrink-0 rounded-md object-cover">`
+      ? `<img data-thumb="${esc(m.id)}" alt="" class="size-10 shrink-0 rounded-md bg-white/10 object-cover">`
       : `<span class="grid size-10 shrink-0 place-items-center rounded-md bg-white/10">${TYPE_ICONS[m.type] || '📎'}</span>`;
     return `<button type="button" data-media="${esc(m.id)}" class="flex items-center gap-2.5 text-left hover:text-neon-cyan">${thumb}<span>${esc(m.text) || `<span class="text-slate-400">${esc(m.typeLabel)} · view</span>`}</span></button>`;
   }
@@ -612,6 +694,7 @@ function renderChat(msgs) {
   els.chatView.innerHTML = (chatPaging.start > 0 ? TOP_LOADER : '') + chatChunkHtml(chatPaging.start, msgs.length, true);
   els.chatView.scrollTop = els.chatView.scrollHeight;
   fillChat();
+  fillThumbs(els.chatView);
 }
 
 const NEAR_EDGE = 600; // px from the edge at which the next page is rendered
@@ -636,6 +719,7 @@ function loadEarlier() {
   if (firstChip && msgs[start - 1].iso === msgs[start].iso) firstChip.remove();
   chatPaging.start = newStart;
   view.scrollTop += view.scrollHeight - before;
+  fillThumbs(view);
 }
 
 // Scrolling near the top renders the previous page; a floating date pill (like WhatsApp)
@@ -691,6 +775,7 @@ function renderTable(msgs) {
   els.tableBody.innerHTML = tableRowsHtml(0, tablePaging.end) + (tablePaging.end < msgs.length ? TABLE_LOADER : '');
   els.tableView.scrollTop = 0;
   fillTable();
+  fillThumbs(els.tableBody);
 }
 
 function loadMoreRows() {
@@ -700,6 +785,7 @@ function loadMoreRows() {
   document.getElementById('tableMore')?.remove();
   els.tableBody.insertAdjacentHTML('beforeend', tableRowsHtml(end, newEnd) + (newEnd < msgs.length ? TABLE_LOADER : ''));
   tablePaging.end = newEnd;
+  fillThumbs(els.tableBody);
 }
 
 const tableNearEnd = () => {
@@ -735,7 +821,12 @@ function openViewer(id) {
   els.viewerTitle.textContent = `${m.name} · ${m.typeLabel}`;
   els.viewerSub.textContent = `${m.date} · ${m.day} · ${m.time}${m.text ? ` — ${m.text}` : ''}`;
   els.viewerDownload.href = `${mediaUrl(id)}?download=1`;
-  els.viewerBody.innerHTML = '<div class="size-12 animate-spin rounded-full border-4 border-white/10 border-t-wa border-r-neon-cyan"></div>';
+  // Show the small preview at once (if we have it) while the full file loads.
+  const spinner = '<div class="size-12 animate-spin rounded-full border-4 border-white/10 border-t-wa border-r-neon-cyan"></div>';
+  const preview = thumbCache.get(id);
+  els.viewerBody.innerHTML = preview
+    ? `<div class="relative grid place-items-center"><img src="${esc(preview)}" alt="" class="max-h-[80vh] max-w-full rounded-lg object-contain opacity-60 blur-[2px]"><div class="absolute">${spinner}</div></div>`
+    : spinner;
   els.viewer.hidden = false;
   document.body.style.overflow = 'hidden';
 
@@ -967,10 +1058,7 @@ els.qrFrame.addEventListener('click', async () => {
   });
   view.addEventListener('error', (e) => {
     if (e.target.tagName !== 'IMG') return;
-    const icon = document.createElement('span');
-    icon.className = 'grid size-full min-h-10 min-w-10 place-items-center text-3xl';
-    icon.textContent = '🖼️';
-    e.target.replaceWith(icon);
+    e.target.replaceWith(mediaIcon());
   }, true);
 });
 els.viewerClose.addEventListener('click', closeViewer);
@@ -992,7 +1080,8 @@ updateFilterNote();
 
 /* ---------------- live connection ---------------- */
 // Connects after startSession(), so a guest's login cookie is already set for the handshake.
-const socket = io({ autoConnect: false });
+// WebSocket first: connects in one round trip (polling first needed 3-4 over the shared link).
+const socket = io({ autoConnect: false, transports: ['websocket', 'polling'], tryAllTransports: true });
 socket.on('status', renderStatus);
 socket.on('session-ended', (r) => showEnded(r && r.why === 'app stopped'
   ? 'The app was stopped on the host computer, so your WhatsApp was unlinked and your data deleted.'
