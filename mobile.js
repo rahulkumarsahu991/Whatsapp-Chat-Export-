@@ -56,7 +56,7 @@ async function setup() {
   execFileSync(NGROK, ['config', 'add-authtoken', token], { stdio: 'inherit' });
 
   console.log('\n  2) Your free fixed link: the Domains page opens now — copy the domain shown there');
-  console.log('     (it looks like  something-something.ngrok-free.app ; click "+ New Domain" if none).');
+  console.log('     (it looks like  something-something.ngrok-free.dev ; click "+ New Domain" if none).');
   openInBrowser('https://dashboard.ngrok.com/domains');
   let domain = '';
   while (!DOMAIN.test(domain)) {

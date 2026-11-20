@@ -23,7 +23,7 @@ Keep the black server window open while you use the site. Close it, or press `Ct
 
 ### Use it on your phone or another device
 
-`start-mobile.bat` runs the same app on this PC and gives it a fixed `https://….ngrok-free.app` link that opens anywhere. Only the Google account(s) you choose can get in.
+`start-mobile.bat` runs the same app on this PC and gives it a fixed `https://….ngrok-free.dev` link that opens anywhere. Only the Google account(s) you choose can get in.
 
 1. **First time:** double-click `start-mobile.bat`. It downloads ngrok and opens the ngrok website.
    - Make a free ngrok account.
