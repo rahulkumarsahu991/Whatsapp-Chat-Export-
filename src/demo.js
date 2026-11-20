@@ -51,13 +51,35 @@ class DemoService extends EventEmitter {
     this.state = 'idle';
     this.message = '';
     this.qr = null;
+    this.pairCode = null;
     this.me = null;
     this.progress = 0;
     this.groups = this.buildGroups();
   }
 
   status() {
-    return { state: this.state, message: this.message, qr: this.qr, me: this.me, progress: this.progress, demo: true };
+    return {
+      state: this.state, message: this.message, qr: this.qr, code: this.pairCode, me: this.me, progress: this.progress, demo: true,
+    };
+  }
+
+  /** Demo of "Link with phone number instead": shows a made-up code, then links after a few seconds. */
+  async requestPairCode(phone) {
+    const digits = String(phone || '').replace(/\D/g, '').replace(/^0+/, '');
+    if (digits.length < 10 || digits.length > 15) {
+      const err = new Error('Enter your WhatsApp number with the country code, e.g. 91 98765 43210.');
+      err.status = 400;
+      throw err;
+    }
+    if (this.state !== 'qr') {
+      const err = new Error('Please wait until the QR code is shown, then try again.');
+      err.status = 409;
+      throw err;
+    }
+    this.pairCode = 'DEMO1234';
+    this.emit('status', this.status());
+    setTimeout(() => this.simulateScan(), 8000);
+    return this.pairCode;
   }
 
   set(state, message) {
@@ -157,6 +179,7 @@ class DemoService extends EventEmitter {
   async simulateScan() {
     if (this.state !== 'qr') return;
     this.qr = null;
+    this.pairCode = null;
     this.set('authenticated', 'Device linked! Syncing your chats…');
     for (const p of [18, 42, 67, 88, 100]) {
       await wait(450);
@@ -268,6 +291,12 @@ class DemoService extends EventEmitter {
   }
 
   async destroy() {}
+
+  async purge() {
+    this.state = 'closed';
+  }
+
+  static clearGuests() {}
 }
 
 module.exports = DemoService;

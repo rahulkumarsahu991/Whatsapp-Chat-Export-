@@ -23,22 +23,42 @@ Keep the black server window open while you use the site. Close it, or press `Ct
 
 ### Use it on your phone or another device
 
-`start-mobile.bat` runs the same app on this PC and gives it a fixed `https://….ngrok-free.dev` link that opens anywhere. Only the Google account(s) you choose can get in.
+`start-mobile.bat` runs the same app on this PC and gives it a fixed `https://….ngrok-free.dev` link that opens anywhere. It has two doors:
+
+| Link | Who | What they get |
+|---|---|---|
+| `https://<your-link>` | **Anyone you send it to** | Their **own** private, temporary login. They link their own WhatsApp and see only their own chats, never yours or anyone else's. |
+| `https://<your-link>/owner` | **You** (Google sign-in with the Gmail you set up) | Your own saved WhatsApp login, the same one as on this PC |
 
 1. **First time:** double-click `start-mobile.bat`. It downloads ngrok and opens the ngrok website.
    - Make a free ngrok account.
    - Paste your **Authtoken** into the black window.
    - Paste your free **domain**, from the Domains page.
-   - Type the **Gmail** address that may open the app.
-2. **Every time after that:** double-click `start-mobile.bat` and open the link it prints on your phone.
+   - Type the **Gmail** address that may use `/owner`.
+2. **Every time after that:** double-click `start-mobile.bat`. The black window prints both links.
    - The first visit on a device shows an ngrok notice; tap **Visit Site**.
-   - Then sign in with Google.
-3. To change the token, link or allowed emails, run `start-mobile.bat --setup`.
+3. To change the token, link or Gmail, run `start-mobile.bat --setup`.
+
+**How other people link their WhatsApp:**
+- **On a computer:** scan the QR code with their phone (WhatsApp → Linked devices → Link a device).
+- **On the same phone:**
+  1. Tap **Link with phone number instead** and enter their number with country code.
+  2. WhatsApp shows a notification; they type the 8-character code shown on the page.
+     No notification? In WhatsApp go to Linked devices → Link a device → **Link with phone number instead**.
+
+**Privacy for guests:** a guest's login is unlinked from their WhatsApp, and everything kept for them is deleted from this PC:
+- when they press **Log out**;
+- when their page has been closed for **20 minutes**;
+- when a login was never linked after 15 minutes;
+- when it has gone unused for 3 hours;
+- when the app stops.
+
+Up to **3 guests** can be logged in at a time. Each one runs its own hidden Chrome, using about 300 MB of memory.
 
 Good to know:
-- The phone link works only while this PC is on and `start-mobile.bat` is running.
-- The free ngrok plan allows about **1 GB of data and 20,000 requests a month**. Excel exports and chats are small, but ZIPs full of videos use that up quickly.
-- Scan the QR on the PC screen. A phone can't scan its own screen.
+- The link works only while this PC is on and `start-mobile.bat` is running.
+- The free ngrok plan allows about **1 GB of data and 20,000 requests a month**, shared by everyone who uses the link. Excel exports and chats are small, but ZIPs full of videos use that up quickly.
+- Anyone who has the plain link can use it, so only send it to people you trust. They can never see your chats.
 
 **Demo mode:** `start-demo.bat` opens the same interface with sample groups and needs no login. Click the QR code to simulate a scan.
 
@@ -58,7 +78,7 @@ Media files are named `date_time_sender_type.ext`, so they sort by date in Explo
 
 ## Good to know
 
-- **Privacy:** everything runs on this computer, at `127.0.0.1` only. Your chats and media are not uploaded anywhere.
+- **Privacy:** everything runs on this computer. With `start.bat` only this computer can open it (`127.0.0.1`). With `start-mobile.bat` the link above reaches it through ngrok; your own login is only behind `/owner`. Chats and media are not uploaded to any server.
 - **Login session:** the session is saved in `%USERPROFILE%\WhatsAppChatExporter`, outside OneDrive, so you don't need to scan again next time. Downloaded media is cached there too, so a file is only fetched once. **Log out** unlinks the device and deletes that cache.
 - **Old media:** WhatsApp only keeps photos and videos on its servers for a limited time. Media your phone no longer has shows *Not available* in Excel and is counted in the export summary.
 - **Old messages:** WhatsApp only gives a linked device the history your phone syncs to it. If you set a *From* date, the app keeps loading older messages until it reaches that date or the history runs out.

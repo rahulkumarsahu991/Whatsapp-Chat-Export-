@@ -25,11 +25,15 @@ const els = {
   exportPanel: $('#exportPanel'), exportSpinner: $('#exportSpinner'), exportCheck: $('#exportCheck'), exportTitle: $('#exportTitle'),
   exportDetail: $('#exportDetail'), exportBar: $('#exportBar'), exportClose: $('#exportClose'), downloadAgainBtn: $('#downloadAgainBtn'),
   toasts: $('#toasts'),
+  modeBadge: $('#modeBadge'), guestNote: $('#guestNote'),
+  pairBox: $('#pairBox'), pairToggle: $('#pairToggle'), pairForm: $('#pairForm'), pairPhone: $('#pairPhone'), pairBtn: $('#pairBtn'),
+  pairCodeBox: $('#pairCodeBox'), pairCode: $('#pairCode'), pairCancel: $('#pairCancel'),
 };
 
 const state = {
   status: null, screen: 'login', chats: [], tab: 'groups', query: '',
   selected: null, data: null, view: 'chat', loadToken: 0, exportJob: null, exportUrl: null,
+  guest: false, ended: false, // guest = someone using the shared link with their own temporary login
 };
 
 // Render in pages so even groups with thousands of messages open instantly (older pages load on scroll).
@@ -98,11 +102,17 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers: { 'X-App': '1', 'ngrok-skip-browser-warning': '1', ...(opts.headers || {}) } });
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
-    try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-    throw new Error(msg);
+    let body = null;
+    try { body = await res.json(); msg = body.error || msg; } catch { /* not json */ }
+    if (body && body.code === 'NO_SESSION') showEnded();
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
   return res;
 }
+const postJson = (path, data) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
 
 const TOAST_COLORS = { info: 'border-l-neon-cyan', success: 'border-l-wa', error: 'border-l-rose-500' };
 function toast(text, kind = 'info', ms = 4200) {
@@ -193,8 +203,10 @@ function trackSync(syncing) {
 }
 
 function renderStatus(st) {
+  if (state.ended) return;
   state.status = st;
   els.demoRibbon.hidden = !st.demo;
+  renderPairing(st);
   trackSync(st.state === 'authenticated' || st.state === 'loading');
 
   if (st.state === 'ready') {
@@ -232,6 +244,95 @@ function renderStatus(st) {
     ? 'Demo mode: click the QR code to simulate a scan'
     : 'The QR code refreshes automatically — keep this page open';
   trackQrWait(!st.qr && (st.state === 'starting' || st.state === 'disconnected'), st.message);
+}
+
+/* ---- link with phone number instead of scanning (a phone can't scan its own screen) ---- */
+function renderPairing(st) {
+  const waiting = st.state === 'qr';
+  els.pairBox.hidden = !waiting;
+  const code = waiting && st.code ? String(st.code) : '';
+  els.pairCodeBox.hidden = !code;
+  els.pairToggle.hidden = !!code || !els.pairForm.hidden;
+  if (code) {
+    els.pairForm.hidden = true;
+    els.pairCode.textContent = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+  }
+}
+
+function openPairForm() {
+  els.pairForm.hidden = false;
+  els.pairToggle.hidden = true;
+  if (!els.pairPhone.value) els.pairPhone.value = store.get('pairPhone') || '';
+}
+
+async function requestPairCode(e) {
+  e.preventDefault();
+  const digits = els.pairPhone.value.replace(/\D/g, '').replace(/^0+/, '');
+  if (digits.length < 10) {
+    toast('Type your number with the country code, e.g. 91 98765 43210', 'error');
+    els.pairPhone.focus();
+    return;
+  }
+  // Indian 10-digit mobile numbers without the country code: add +91.
+  const phone = digits.length === 10 && /^[6-9]/.test(digits) ? `91${digits}` : digits;
+  els.pairBtn.disabled = true;
+  els.pairBtn.textContent = 'Wait…';
+  try {
+    const r = await (await postJson('/api/pair', { phone })).json();
+    store.set('pairPhone', els.pairPhone.value);
+    if (r.code && state.status) renderPairing({ ...state.status, code: r.code });
+    toast('Code ready — check WhatsApp on your phone', 'success');
+  } catch (err) {
+    toast(err.message, 'error', 6000);
+  } finally {
+    els.pairBtn.disabled = false;
+    els.pairBtn.textContent = 'Get code';
+  }
+}
+
+/** This visitor's temporary login is gone (logged out, timed out, or the app restarted). */
+function showEnded(message) {
+  if (state.ended) return;
+  state.ended = true;
+  setScreen('login');
+  els.pairBox.hidden = true;
+  els.qrFlip.classList.remove('flipped');
+  els.qrImg.hidden = true;
+  els.qrLoader.hidden = false;
+  els.qrFrame.classList.remove('live');
+  els.qrLoaderText.textContent = 'Logged out';
+  els.qrLoader.firstElementChild.hidden = true; // stop the spinner
+  els.qrHint.textContent = '';
+  els.statusPill.dataset.state = 'disconnected';
+  els.statusText.textContent = message || 'Your session ended. Your WhatsApp was unlinked and your data deleted from this app.';
+  els.retryBtn.textContent = 'Start again';
+  els.retryBtn.hidden = false;
+  trackQrWait(false);
+}
+
+/** Who is this page for? The owner (this PC, or /owner on the shared link) or a guest with their own login. */
+async function startSession() {
+  try {
+    const info = await (await api('/api/session', { method: 'POST' })).json();
+    state.guest = info.role === 'guest';
+    if (state.guest) {
+      els.modeBadge.textContent = 'Your own private login';
+      els.guestNote.hidden = false;
+      els.guestNote.textContent = `Private & temporary: only you see your chats. When you log out, or close this page for ${info.idleMinutes || 20} minutes, this app unlinks from your WhatsApp and deletes your data.`;
+      els.logoutBtn.title = 'Log out & delete my data';
+    } else if (!info.local) {
+      els.modeBadge.textContent = 'Your WhatsApp, from anywhere';
+    }
+    if (matchMedia('(pointer: coarse)').matches) openPairForm(); // touch screen: probably the phone to link
+    socket.connect();
+  } catch (err) {
+    els.statusPill.dataset.state = 'error';
+    els.statusText.textContent = err.message;
+    els.qrLoaderText.textContent = err.status === 503 ? 'Busy right now' : 'Could not start';
+    els.retryBtn.textContent = 'Try again';
+    els.retryBtn.hidden = false;
+    state.ended = true; // the button reloads the page
+  }
 }
 
 // While the QR is being prepared, count the seconds so a slow connection doesn't look frozen.
@@ -827,11 +928,31 @@ els.exportSheet.addEventListener('click', (e) => { if (e.target.closest('[data-c
 els.refreshBtn.addEventListener('click', () => loadChats(true));
 els.backBtn.addEventListener('click', () => els.shell.classList.remove('show-chat'));
 els.logoutBtn.addEventListener('click', async () => {
-  if (!confirm('Log out? This unlinks the exporter from your WhatsApp and clears downloaded media from this computer. You can scan again any time.')) return;
-  try { await api('/api/logout', { method: 'POST' }); toast('Logged out', 'success'); } catch (err) { toast(err.message, 'error'); }
+  const question = state.guest
+    ? 'Log out? This app unlinks from your WhatsApp and deletes your chats, photos and files from it.'
+    : 'Log out? This unlinks the exporter from your WhatsApp and clears downloaded media from this computer. You can scan again any time.';
+  if (!confirm(question)) return;
+  try {
+    const r = await (await api('/api/logout', { method: 'POST' })).json();
+    if (r.ended) showEnded('Logged out. Your WhatsApp was unlinked and your data deleted from this app.');
+    else toast('Logged out', 'success');
+  } catch (err) { toast(err.message, 'error'); }
 });
 els.retryBtn.addEventListener('click', async () => {
+  if (state.ended) { window.location.reload(); return; }
   try { await api('/api/restart', { method: 'POST' }); } catch (err) { toast(err.message, 'error'); }
+});
+els.pairToggle.addEventListener('click', () => { openPairForm(); els.pairPhone.focus(); });
+els.pairForm.addEventListener('submit', requestPairCode);
+els.pairCancel.addEventListener('click', async () => {
+  els.pairCodeBox.hidden = true;
+  try { await api('/api/restart', { method: 'POST' }); } catch (err) { toast(err.message, 'error'); }
+});
+els.pairCode.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(els.pairCode.textContent.replace(/-/g, ''));
+    toast('Code copied', 'success', 2000);
+  } catch { /* clipboard not allowed */ }
 });
 els.qrFrame.addEventListener('click', async () => {
   if (!state.status?.demo || state.status.state !== 'qr') return;
@@ -870,8 +991,12 @@ setIncludeMedia(store.get('includeMedia') !== '0', false);
 updateFilterNote();
 
 /* ---------------- live connection ---------------- */
-const socket = io();
+// Connects after startSession(), so a guest's login cookie is already set for the handshake.
+const socket = io({ autoConnect: false });
 socket.on('status', renderStatus);
+socket.on('session-ended', (r) => showEnded(r && r.why === 'app stopped'
+  ? 'The app was stopped on the host computer, so your WhatsApp was unlinked and your data deleted.'
+  : undefined));
 socket.on('progress', (p) => {
   if (!els.busy.hidden && p && p.loaded) els.busyText.textContent = `Fetching messages… ${fmtNum(p.loaded)} loaded`;
 });
@@ -908,10 +1033,15 @@ socket.on('export-error', (r) => {
   showExportPanel({ title: 'Export failed', detail: r.error, pct: 100, failed: true });
 });
 socket.on('disconnect', () => {
+  if (state.ended) return;
   if (state.screen === 'login') {
     els.statusPill.dataset.state = 'error';
-    els.statusText.textContent = 'Lost connection to the exporter — is the server window still open?';
+    els.statusText.textContent = state.guest
+      ? 'Lost connection — check your internet. Reconnecting…'
+      : 'Lost connection to the exporter — is the server window still open?';
   } else {
-    toast('Lost connection to the exporter server. Restart it with start.bat.', 'error', 8000);
+    toast(state.guest ? 'Lost connection — reconnecting…' : 'Lost connection to the exporter server. Restart it with start.bat.', 'error', 8000);
   }
 });
+
+startSession();

@@ -20,18 +20,39 @@ const { extFor, Semaphore } = require('./media');
 //  • not in AppData, because packaged launchers (e.g. a Windows Store app) silently redirect AppData
 //    writes to a private copy that a double-clicked start.bat can't see.
 const SESSION_ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
-const CLIENT_ID = 'exporter';
-const MEDIA_CACHE = path.join(SESSION_ROOT, 'media-cache'); // downloaded photos/videos, reused by preview + export
-const PEOPLE_FILE = path.join(SESSION_ROOT, 'people-cache.json'); // sender names/numbers, so groups reopen fast
+// Logins of people who open the shared link (temporary; wiped when they leave and at every start).
+const GUEST_ROOT = path.join(SESSION_ROOT, 'guests');
+const OWNER_ID = 'exporter';
+
+/** Folders of one login. The owner's keeps the original names, so the existing login keeps working. */
+function sessionPaths(id) {
+  if (id === OWNER_ID) {
+    return {
+      dataPath: SESSION_ROOT,
+      sessionDir: path.join(SESSION_ROOT, `session-${id}`),
+      ok: path.join(SESSION_ROOT, 'session-ok'), // written once a login reaches "ready"
+      media: path.join(SESSION_ROOT, 'media-cache'), // downloaded photos/videos, reused by preview + export
+      people: path.join(SESSION_ROOT, 'people-cache.json'), // sender names/numbers, so groups reopen fast
+      // Chrome's HTTP cache lives outside the session folder, so WhatsApp Web's ~10 MB of scripts are
+      // downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
+      browserCache: path.join(SESSION_ROOT, 'browser-cache'),
+    };
+  }
+  const root = path.join(GUEST_ROOT, id); // everything of one guest in one folder → one delete removes it all
+  return {
+    root,
+    dataPath: root,
+    sessionDir: path.join(root, `session-${id}`),
+    ok: path.join(root, 'session-ok'),
+    media: path.join(root, 'media-cache'),
+    people: path.join(root, 'people-cache.json'),
+    browserCache: path.join(root, 'browser-cache'),
+  };
+}
 const PEOPLE_TTL = 7 * 24 * 60 * 60 * 1000;
 const MAX_MSG_REFS = 40000;
 const CACHE_TTL = 10 * 60 * 1000;
 const CHAT_LIST_TTL = 2 * 60 * 1000;
-const SESSION_DIR = path.join(SESSION_ROOT, `session-${CLIENT_ID}`);
-const SESSION_OK = path.join(SESSION_ROOT, 'session-ok'); // written once a login reaches "ready"
-// Chrome's HTTP cache lives outside the session folder, so WhatsApp Web's ~10 MB of scripts are
-// downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
-const BROWSER_CACHE = path.join(SESSION_ROOT, 'browser-cache');
 const LOAD_TIMEOUT_MS = 3 * 60 * 1000; // whatsapp-web.js gives WhatsApp Web only 30 s to load by default
 const READY_WATCHDOG_MS = 5 * 60 * 1000; // linked, but no sync progress for this long → reconnect
 const MAX_STUCK_RESTARTS = 2;
@@ -85,10 +106,10 @@ function findBrowser() {
 }
 
 // If the server window was closed abruptly, its hidden Chrome can survive and keep the session
-// folder locked, which makes the next start fail. Close only Chrome/Edge processes using our session folder.
-function killStaleBrowsers() {
+// folder locked, which makes the next start fail. Close only Chrome/Edge processes using that folder.
+function killStaleBrowsers(folder) {
   if (process.platform !== 'win32') return;
-  const dir = SESSION_ROOT.replace(/'/g, "''");
+  const dir = folder.replace(/'/g, "''");
   const script = "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='msedge.exe'\" | "
     + `Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | `
     + 'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
@@ -97,7 +118,15 @@ function killStaleBrowsers() {
   } catch { /* nothing to clean up, or PowerShell unavailable */ }
 }
 
-const idStr = (v) => (typeof v === 'string' ? v : (v && v._serialized) || '');
+function removeFolder(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 500 });
+  } catch (err) {
+    console.warn('[cleanup] could not remove', dir, err.message);
+  }
+}
+
+const idStr = (v) =>(typeof v === 'string' ? v : (v && v._serialized) || '');
 
 // For photos/videos WhatsApp keeps a small JPEG preview (base64) in the raw message body.
 function thumbOf(m) {
@@ -142,12 +171,18 @@ function describe(m) {
 }
 
 class WhatsAppService extends EventEmitter {
-  constructor() {
+  /** @param {{ id?: string }} [opts] login id: 'exporter' = the owner's saved login; others = a guest's temporary login */
+  constructor(opts = {}) {
     super();
+    this.clientId = opts.id || OWNER_ID;
+    this.guest = this.clientId !== OWNER_ID;
+    this.paths = sessionPaths(this.clientId);
     this.client = null;
     this.state = 'idle';
     this.message = '';
     this.qr = null;
+    this.pairCode = null; // 8-character code for "Link with phone number instead"
+    this.pairPhone = '';
     this.me = null;
     this.progress = 0;
     this.stopping = false;
@@ -167,7 +202,9 @@ class WhatsAppService extends EventEmitter {
   }
 
   status() {
-    return { state: this.state, message: this.message, qr: this.qr, me: this.me, progress: this.progress, demo: false };
+    return {
+      state: this.state, message: this.message, qr: this.qr, code: this.pairCode, me: this.me, progress: this.progress, demo: false,
+    };
   }
 
   set(state, message) {
@@ -179,9 +216,9 @@ class WhatsAppService extends EventEmitter {
 
   /** A login that never reached "ready" can leave half-written data that makes the next link fail. */
   clearUnfinishedSession() {
-    if (fs.existsSync(SESSION_OK) || !fs.existsSync(SESSION_DIR)) return;
+    if (fs.existsSync(this.paths.ok) || !fs.existsSync(this.paths.sessionDir)) return;
     try {
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+      fs.rmSync(this.paths.sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
       console.log('[whatsapp] cleared an unfinished login session — a fresh QR will be shown');
     } catch (err) {
       console.warn('[whatsapp] could not clear old session:', err.message);
@@ -190,8 +227,8 @@ class WhatsAppService extends EventEmitter {
 
   markSession(valid) {
     try {
-      if (valid) fs.writeFileSync(SESSION_OK, new Date().toISOString());
-      else fs.rmSync(SESSION_OK, { force: true });
+      if (valid) fs.writeFileSync(this.paths.ok, new Date().toISOString());
+      else fs.rmSync(this.paths.ok, { force: true });
     } catch { /* not critical */ }
   }
 
@@ -201,8 +238,9 @@ class WhatsAppService extends EventEmitter {
     this.startedAt = Date.now();
     this.lastSyncProgressAt = 0;
     this.set('starting', 'Opening WhatsApp Web…');
-    killStaleBrowsers();
+    if (!this.guest) killStaleBrowsers(this.paths.sessionDir); // a guest's folder is always brand new
     this.clearUnfinishedSession();
+    fs.mkdirSync(this.paths.dataPath, { recursive: true });
 
     // Timing of each login step, printed in the server window to see where time goes.
     const t0 = Date.now();
@@ -214,8 +252,10 @@ class WhatsAppService extends EventEmitter {
     };
 
     const client = new Client({
-      authStrategy: new ExporterAuth({ clientId: CLIENT_ID, dataPath: SESSION_ROOT }),
+      authStrategy: new ExporterAuth({ clientId: this.clientId, dataPath: this.paths.dataPath }),
       authTimeoutMs: LOAD_TIMEOUT_MS,
+      // Our own object: whatsapp-web.js would otherwise share one default object between all logins.
+      pairWithPhoneNumber: { phoneNumber: '', showNotification: true, intervalMs: 180000 },
       puppeteer: {
         headless: true,
         executablePath: findBrowser(),
@@ -226,7 +266,7 @@ class WhatsAppService extends EventEmitter {
           '--no-default-browser-check', '--disable-extensions', '--disable-default-apps', '--disable-sync',
           '--disable-background-networking', '--disable-component-update', '--mute-audio',
           '--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,CalculateNativeWinOcclusion',
-          `--disk-cache-dir=${BROWSER_CACHE}`, '--disk-cache-size=268435456',
+          `--disk-cache-dir=${this.paths.browserCache}`, '--disk-cache-size=268435456',
         ],
       },
     });
@@ -242,12 +282,20 @@ class WhatsAppService extends EventEmitter {
       });
       this.set('qr', 'Scan this QR code with WhatsApp → Linked devices');
     });
+    // "Link with phone number instead": WhatsApp makes a new code every 3 minutes.
+    client.on('code', (code) => {
+      if (!current() || !this.pairPhone || this.state === 'ready') return;
+      this.pairCode = code;
+      this.emit('status', this.status());
+    });
     // WhatsApp keeps sending sync progress (and can re-announce auth) after "ready";
     // once ready, those must not push the app back to the login screen.
     client.on('authenticated', () => {
       if (!current() || this.state === 'ready') return;
       mark('linked (authenticated)');
       this.qr = null;
+      this.pairCode = null;
+      this.pairPhone = '';
       this.set('authenticated', 'Device linked! Opening your chats…');
       this.armReadyWatchdog(client);
     });
@@ -330,6 +378,35 @@ class WhatsAppService extends EventEmitter {
     }
   }
 
+  /**
+   * Link without scanning: WhatsApp shows a notification on that phone, and the person types the
+   * 8-character code from this page under Linked devices → Link with phone number instead.
+   * (A phone can't scan a QR code shown on its own screen.)
+   */
+  async requestPairCode(phone) {
+    const digits = String(phone || '').replace(/\D/g, '').replace(/^0+/, '');
+    if (digits.length < 10 || digits.length > 15) {
+      const err = new Error('Enter your WhatsApp number with the country code, e.g. 91 98765 43210.');
+      err.status = 400;
+      throw err;
+    }
+    const client = this.client;
+    if (!client || this.state !== 'qr') {
+      const err = new Error('Please wait until the QR code is shown, then try again.');
+      err.status = 409;
+      throw err;
+    }
+    // Stops whatsapp-web.js from switching back to QR codes while the person types the code.
+    client.options.pairWithPhoneNumber.phoneNumber = digits;
+    this.pairPhone = digits;
+    const code = await client.requestPairingCode(digits, true);
+    if (this.client !== client) return null;
+    this.pairCode = code;
+    console.log(`[login] pairing code requested for a number ending ${digits.slice(-2)}`);
+    this.emit('status', this.status());
+    return code;
+  }
+
   /** Manual "Retry" button: start over with fresh retry budgets. */
   retry() {
     this.startRetries = 0;
@@ -370,6 +447,8 @@ class WhatsAppService extends EventEmitter {
     const c = this.client;
     this.client = null;
     this.qr = null;
+    this.pairCode = null;
+    this.pairPhone = '';
     this.me = null;
     this.cache.clear(); // (sender names in this.people survive reconnects; logout clears them)
     this.msgRefs.clear();
@@ -400,7 +479,7 @@ class WhatsAppService extends EventEmitter {
     clearTimeout(this.peopleTimer);
     this.people.clear();
     this.markSession(false);
-    for (const dir of [SESSION_DIR, MEDIA_CACHE, PEOPLE_FILE]) {
+    for (const dir of [this.paths.sessionDir, this.paths.media, this.paths.people]) {
       try {
         fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 });
       } catch (err) {
@@ -409,6 +488,30 @@ class WhatsAppService extends EventEmitter {
     }
     this.stopping = false;
     this.start();
+  }
+
+  /**
+   * A guest is done: unlink this PC from their WhatsApp (if linked), close the browser and delete
+   * every file kept for them. Nothing of theirs stays on this computer.
+   */
+  async purge() {
+    this.stopping = true;
+    try {
+      if (this.client && this.state === 'ready') await this.client.logout();
+    } catch (err) {
+      console.warn('[purge] logout failed:', err.message);
+    }
+    await this.destroy();
+    clearTimeout(this.peopleTimer);
+    this.people.clear();
+    if (this.guest) removeFolder(this.paths.root);
+  }
+
+  /** At start-up: remove guest logins left over from a run that ended abruptly. */
+  static clearGuests() {
+    if (!fs.existsSync(GUEST_ROOT)) return;
+    killStaleBrowsers(GUEST_ROOT);
+    removeFolder(GUEST_ROOT);
   }
 
   /** Connection details of the hidden WhatsApp Web page, for troubleshooting (no chat data). */
@@ -600,7 +703,7 @@ class WhatsAppService extends EventEmitter {
 
   loadPeople() {
     try {
-      const saved = JSON.parse(fs.readFileSync(PEOPLE_FILE, 'utf8'));
+      const saved = JSON.parse(fs.readFileSync(this.paths.people, 'utf8'));
       const now = Date.now();
       for (const [id, p] of Object.entries(saved)) {
         if (p && p.name && now - (p.at || 0) < PEOPLE_TTL) this.people.set(id, p);
@@ -612,8 +715,9 @@ class WhatsAppService extends EventEmitter {
     clearTimeout(this.peopleTimer);
     this.peopleTimer = setTimeout(() => {
       try {
-        fs.mkdirSync(SESSION_ROOT, { recursive: true });
-        fs.writeFileSync(PEOPLE_FILE, JSON.stringify(Object.fromEntries(this.people)));
+        if (this.guest && !fs.existsSync(this.paths.root)) return; // guest already left
+        fs.mkdirSync(path.dirname(this.paths.people), { recursive: true });
+        fs.writeFileSync(this.paths.people, JSON.stringify(Object.fromEntries(this.people)));
       } catch (err) { console.warn('[people] could not save cache:', err.message); }
     }, 1500);
   }
@@ -696,11 +800,12 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Full media file for a message, downloaded once and kept in MEDIA_CACHE.
+   * Full media file for a message, downloaded once and kept in this login's media cache.
    * Resolves to { path, mimetype, filename } or null when WhatsApp no longer has the file.
    */
   async getMediaFile(id) {
     const key = crypto.createHash('sha1').update(id).digest('hex');
+    const MEDIA_CACHE = this.paths.media;
     const metaPath = path.join(MEDIA_CACHE, `${key}.json`);
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));

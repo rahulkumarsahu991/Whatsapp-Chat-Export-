@@ -1,11 +1,14 @@
 'use strict';
 
 // Phone / other-device access: runs the normal exporter on this PC plus an ngrok tunnel that gives it
-// one fixed https link. Visitors must sign in with Google, and only the email(s) you choose get in.
+// one fixed https link.
+//   https://<link>        share it: every person links their OWN WhatsApp (QR or phone-number code)
+//   https://<link>/owner  you: Google sign-in (only the email(s) you choose) → your own saved login
 //
 //   start-mobile.bat            → first time asks for your ngrok details, then starts everything
 //   start-mobile.bat --setup    → change the ngrok token / link / allowed emails
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -69,33 +72,46 @@ async function setup() {
     emails = (await ask('     Google email(s), comma separated: ')).toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
   }
 
-  const settings = { domain, emails };
+  const settings = { domain, emails, ownerKey: crypto.randomBytes(24).toString('base64url') };
   fs.mkdirSync(ROOT, { recursive: true });
   fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2));
   console.log('\n  Saved. Next time just double-click start-mobile.bat.\n');
   return settings;
 }
 
-/** ngrok traffic policy: Google sign-in → block every other account → pass the email to the app. */
+/**
+ * ngrok traffic policy:
+ *  - every request: drop any x-wa-exporter-email header the visitor sent (nobody can fake it);
+ *  - /owner only: Google sign-in → block every other account → pass the signed-in email to the app,
+ *    which then lets that browser use the owner's WhatsApp.
+ * Everything else is open: each visitor gets their own WhatsApp login, so they only ever see their own chats.
+ */
 function writePolicy(emails) {
   const list = emails.map((e) => `'${e}'`).join(', ');
+  // (/ngrok/… are ngrok's own sign-in/sign-out pages; they must go through the oauth step too)
+  const OWNER_PATH = "(req.url.path.startsWith('/owner') || req.url.path.startsWith('/ngrok/'))";
   fs.writeFileSync(POLICY, [
     'on_http_request:',
-    '  - actions:',
-    '      - type: oauth',
-    '        config:',
-    '          provider: google',
-    '  - expressions:',
-    `      - "!(actions.ngrok.oauth.identity.email in [${list}])"`,
-    '    actions:',
-    '      - type: deny',
-    '        config:',
-    '          status_code: 403',
     '  - actions:',
     '      - type: remove-headers',
     '        config:',
     '          headers:',
     '            - x-wa-exporter-email',
+    '  - expressions:',
+    `      - "${OWNER_PATH}"`,
+    '    actions:',
+    '      - type: oauth',
+    '        config:',
+    '          provider: google',
+    '  - expressions:',
+    `      - "${OWNER_PATH} && !(actions.ngrok.oauth.identity.email in [${list}])"`,
+    '    actions:',
+    '      - type: deny',
+    '        config:',
+    '          status_code: 403',
+    '  - expressions:',
+    `      - "${OWNER_PATH}"`,
+    '    actions:',
     '      - type: add-headers',
     '        config:',
     '          headers:',
@@ -129,6 +145,11 @@ function startTunnel(domain) {
   let settings = null;
   try { settings = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')); } catch { /* first run */ }
   if (!settings || process.argv.includes('--setup')) settings = await setup();
+  if (!settings.ownerKey) {
+    // Secret for the owner's browser cookie (set after Google sign-in at /owner). New setup = new key.
+    settings.ownerKey = crypto.randomBytes(24).toString('base64url');
+    fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2));
+  }
 
   writePolicy(settings.emails);
   if (process.argv.includes('--print-policy')) {
@@ -137,6 +158,7 @@ function startTunnel(domain) {
   }
   process.env.PUBLIC_HOST = settings.domain;
   process.env.ALLOWED_EMAILS = settings.emails.join(',');
+  process.env.OWNER_KEY = settings.ownerKey;
   startTunnel(settings.domain);
   require('./server.js'); // the normal exporter, now also reachable at https://<domain>
 })().catch((err) => {
