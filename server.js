@@ -20,21 +20,53 @@ const wa = new Service();
 
 // Only this computer may use the app: your WhatsApp is never exposed to the network.
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-const isLocalHost = (host = '') => LOCAL_HOSTS.has(host.replace(/:\d+$/, '').toLowerCase());
+const hostOnly = (host = '') => host.replace(/:\d+$/, '').toLowerCase();
+const isLocalHost = (host = '') => LOCAL_HOSTS.has(hostOnly(host));
 const isLocalOrigin = (origin) => {
   if (!origin) return true;
   try { return isLocalHost(new URL(origin).host); } catch { return false; }
 };
 
+// Phone / other-device access (start-mobile.bat → mobile.js): an ngrok tunnel forwards its address to
+// this PC. ngrok's traffic policy makes visitors sign in with Google, blocks other accounts, drops any
+// x-wa-exporter-email header the visitor sent and sets it to the signed-in email. We check it again.
+// Without these settings, nothing but this computer can open the app.
+const PUBLIC_HOST = hostOnly(String(process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''));
+const ALLOWED_EMAILS = String(process.env.ALLOWED_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
+const isPublicHost = (host = '') => !!PUBLIC_HOST && hostOnly(host) === PUBLIC_HOST;
+const isPublicOrigin = (origin) => {
+  if (!origin) return true;
+  try { return isPublicHost(new URL(origin).host); } catch { return false; }
+};
+const signedInEmail = (headers) => String(headers['x-wa-exporter-email'] || '').trim().toLowerCase();
+const allowedVisitor = (headers) => ALLOWED_EMAILS.length > 0 && ALLOWED_EMAILS.includes(signedInEmail(headers));
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  allowRequest: (req, cb) => cb(null, isLocalHost(req.headers.host) && isLocalOrigin(req.headers.origin)),
+  allowRequest: (req, cb) => {
+    const { host, origin } = req.headers;
+    const local = isLocalHost(host) && isLocalOrigin(origin);
+    const remote = isPublicHost(host) && isPublicOrigin(origin) && allowedVisitor(req.headers);
+    cb(null, local || remote);
+  },
 });
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
-  if (!isLocalHost(req.headers.host)) return res.status(403).send('Forbidden');
+  const { host } = req.headers;
+  if (isPublicHost(host)) {
+    if (!allowedVisitor(req.headers)) {
+      const who = signedInEmail(req.headers);
+      console.warn(`[tunnel] blocked ${who || 'a visitor who is not signed in'}`);
+      return res.status(403).send(who
+        ? `This account (${who}) is not allowed to open this app.`
+        : 'Please open this link through the ngrok sign-in (start-mobile.bat).');
+    }
+    if (!isPublicOrigin(req.headers.origin)) return res.status(403).json({ error: 'Forbidden' });
+  } else if (!isLocalHost(host)) {
+    return res.status(403).send('Forbidden');
+  }
   if (req.method === 'POST' && req.get('X-App') !== '1') return res.status(403).json({ error: 'Forbidden' });
   next();
 });
@@ -151,6 +183,10 @@ server.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;
   console.log('\n  * WhatsApp Chat Exporter 3D');
   console.log(`  * Open ${url} in your browser${DEMO ? '  (DEMO MODE - sample data)' : ''}`);
+  if (PUBLIC_HOST) {
+    console.log(`  * Phone / other devices: https://${PUBLIC_HOST}`);
+    console.log(`    (Google sign-in required; allowed: ${ALLOWED_EMAILS.join(', ') || 'NOBODY - run setup-mobile.bat'})`);
+  }
   console.log('  * Keep this window open while you use the app. Press Ctrl+C to stop.\n');
   if (OPEN_BROWSER && process.platform === 'win32') exec(`start "" "${url}"`);
   wa.start();

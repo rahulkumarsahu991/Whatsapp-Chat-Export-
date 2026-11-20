@@ -94,7 +94,8 @@ function dayLabel(m) {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { 'X-App': '1', ...(opts.headers || {}) } });
+  // (ngrok-skip-browser-warning: on the phone link, keeps ngrok's free-plan notice page out of data requests)
+  const res = await fetch(path, { ...opts, headers: { 'X-App': '1', 'ngrok-skip-browser-warning': '1', ...(opts.headers || {}) } });
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try { msg = (await res.json()).error || msg; } catch { /* not json */ }

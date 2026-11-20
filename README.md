@@ -21,6 +21,25 @@ Inside the app you can click a photo or video to open it full size, play voice n
 
 Keep the black server window open while you use the site. Close it, or press `Ctrl+C`, to stop.
 
+### Use it on your phone or another device
+
+`start-mobile.bat` runs the same app on this PC and gives it a fixed `https://….ngrok-free.app` link that opens anywhere. Only the Google account(s) you choose can get in.
+
+1. **First time:** double-click `start-mobile.bat`. It downloads ngrok and opens the ngrok website.
+   - Make a free ngrok account.
+   - Paste your **Authtoken** into the black window.
+   - Paste your free **domain**, from the Domains page.
+   - Type the **Gmail** address that may open the app.
+2. **Every time after that:** double-click `start-mobile.bat` and open the link it prints on your phone.
+   - The first visit on a device shows an ngrok notice; tap **Visit Site**.
+   - Then sign in with Google.
+3. To change the token, link or allowed emails, run `start-mobile.bat --setup`.
+
+Good to know:
+- The phone link works only while this PC is on and `start-mobile.bat` is running.
+- The free ngrok plan allows about **1 GB of data and 20,000 requests a month**. Excel exports and chats are small, but ZIPs full of videos use that up quickly.
+- Scan the QR on the PC screen. A phone can't scan its own screen.
+
 **Demo mode:** `start-demo.bat` opens the same interface with sample groups and needs no login. Click the QR code to simulate a scan.
 
 ## What the Excel file contains
