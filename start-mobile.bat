@@ -2,8 +2,8 @@
 title WhatsApp Chat Exporter - phone access
 cd /d "%~dp0"
 
-rem Use the portable Node.js in %LOCALAPPDATA%\WhatsAppChatExporter\node when it is there (no admin install needed).
-if exist "%LOCALAPPDATA%\WhatsAppChatExporter\node\node.exe" set "PATH=%LOCALAPPDATA%\WhatsAppChatExporter\node;%PATH%"
+rem Use the portable Node.js in %USERPROFILE%\WhatsAppChatExporter\node when it is there (no admin install needed).
+if exist "%USERPROFILE%\WhatsAppChatExporter\node\node.exe" set "PATH=%USERPROFILE%\WhatsAppChatExporter\node;%PATH%"
 
 node -v >nul 2>&1
 if errorlevel 1 goto nonode

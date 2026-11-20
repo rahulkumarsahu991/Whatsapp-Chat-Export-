@@ -12,7 +12,8 @@ const path = require('path');
 const readline = require('readline');
 const { spawn, execFileSync } = require('child_process');
 
-const ROOT = path.join(process.env.LOCALAPPDATA || os.homedir(), 'WhatsAppChatExporter');
+// App data lives in C:\Users\<you>\WhatsAppChatExporter (same folder as src/whatsapp.js uses).
+const ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
 const NGROK = path.join(ROOT, 'ngrok', process.platform === 'win32' ? 'ngrok.exe' : 'ngrok');
 const SETTINGS = path.join(ROOT, 'mobile-settings.json');
 const POLICY = path.join(ROOT, 'ngrok-policy.yml');

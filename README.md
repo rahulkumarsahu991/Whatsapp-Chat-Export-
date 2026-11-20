@@ -7,7 +7,7 @@ A clean, dark website (Tailwind CSS) that works like WhatsApp Web. It fits phone
 
 1. **Double-click `start.bat`**, or double-click `index.html`, which waits for the server and then opens the app.
    The first run installs the packages, which takes a few minutes.
-   If Node.js isn't installed system-wide, `start.bat` uses the portable copy in `%LOCALAPPDATA%\WhatsAppChatExporter\node`.
+   If Node.js isn't installed system-wide, `start.bat` uses the portable copy in `%USERPROFILE%\WhatsAppChatExporter\node`.
 2. The browser opens at **http://localhost:3000**. If it doesn't, open that address yourself.
 3. On your phone, open WhatsApp → **Settings / ⋮ Menu → Linked devices → Link a device**, then scan the QR.
 4. Once your chats load, click any **group** on the left.
@@ -59,11 +59,11 @@ Media files are named `date_time_sender_type.ext`, so they sort by date in Explo
 ## Good to know
 
 - **Privacy:** everything runs on this computer, at `127.0.0.1` only. Your chats and media are not uploaded anywhere.
-- **Login session:** the session is saved in `%LOCALAPPDATA%\WhatsAppChatExporter`, outside OneDrive, so you don't need to scan again next time. Downloaded media is cached there too, so a file is only fetched once. **Log out** unlinks the device and deletes that cache.
+- **Login session:** the session is saved in `%USERPROFILE%\WhatsAppChatExporter`, outside OneDrive, so you don't need to scan again next time. Downloaded media is cached there too, so a file is only fetched once. **Log out** unlinks the device and deletes that cache.
 - **Old media:** WhatsApp only keeps photos and videos on its servers for a limited time. Media your phone no longer has shows *Not available* in Excel and is counted in the export summary.
 - **Old messages:** WhatsApp only gives a linked device the history your phone syncs to it. If you set a *From* date, the app keeps loading older messages until it reaches that date or the history runs out.
 - **Phone numbers:** in some newer groups WhatsApp hides members' numbers. Those members show *Hidden (privacy)*, and their names still appear.
-- **Slow internet:** WhatsApp Web gets up to 3 minutes to load, and the app retries by itself if the connection drops. Its files (~15 MB) are cached in `%LOCALAPPDATA%\WhatsAppChatExporter\browser-cache`, so only the very first start downloads them. Contacts' profile photos are skipped during login to save data. If linking fails after a scan, a fresh QR appears on the same page within seconds; just scan again. Keep WhatsApp open on the phone while it syncs.
+- **Slow internet:** WhatsApp Web gets up to 3 minutes to load, and the app retries by itself if the connection drops. Its files (~15 MB) are cached in `%USERPROFILE%\WhatsAppChatExporter\browser-cache`, so only the very first start downloads them. Contacts' profile photos are skipped during login to save data. If linking fails after a scan, a fresh QR appears on the same page within seconds; just scan again. Keep WhatsApp open on the phone while it syncs.
 - **Network hiccups:** a sync that keeps making progress is never interrupted. If it shows no progress for 5 minutes, the app reconnects by itself without asking for a new QR.
 - **Stopping the app:** close the server window or press `Ctrl+C`. This closes WhatsApp's hidden browser properly so your login stays saved.
 - **Chat list speed:** the first list after linking can take a minute or two while WhatsApp syncs. After that it is cached for 2 minutes, and the ⟳ button fetches it fresh.

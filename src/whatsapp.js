@@ -15,8 +15,11 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const { SYSTEM_TYPES, TYPE_LABELS, timeParts, inRange, cacheKey } = require('./format');
 const { extFor, Semaphore } = require('./media');
 
-// The login session is kept outside OneDrive so OneDrive sync can't lock Chrome's profile files.
-const SESSION_ROOT = path.join(process.env.LOCALAPPDATA || os.homedir(), 'WhatsAppChatExporter');
+// App data (login session, caches, portable Node/ngrok) lives in C:\Users\<you>\WhatsAppChatExporter:
+//  • not in OneDrive, so OneDrive sync can't lock Chrome's profile files;
+//  • not in AppData, because packaged launchers (e.g. a Windows Store app) silently redirect AppData
+//    writes to a private copy that a double-clicked start.bat can't see.
+const SESSION_ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
 const CLIENT_ID = 'exporter';
 const MEDIA_CACHE = path.join(SESSION_ROOT, 'media-cache'); // downloaded photos/videos, reused by preview + export
 const PEOPLE_FILE = path.join(SESSION_ROOT, 'people-cache.json'); // sender names/numbers, so groups reopen fast
