@@ -1,0 +1,3 @@
+* text=auto
+# Windows batch files must keep CRLF line endings (cmd misreads LF-only .bat files), so store them as-is.
+*.bat -text
