@@ -2,7 +2,7 @@
 //  • Opened from the PC app (localhost) or from the cloud server itself → '' (the same site).
 //  • Opened from GitHub Pages → the cloud server address below. Put your server's URL here
 //    after deploying it (see "Deploy online" in README.md), e.g. 'https://your-name-whatsapp.hf.space'.
-window.EXPORTER_CLOUD_URL = '';
+window.EXPORTER_CLOUD_URL = 'https://rahul-genai-whatsapp-session-server.hf.space';
 
 window.EXPORTER_API = location.hostname.endsWith('github.io') ? window.EXPORTER_CLOUD_URL : '';
 
