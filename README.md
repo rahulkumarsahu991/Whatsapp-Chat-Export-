@@ -68,36 +68,6 @@ index.html         Launcher page you can double-click
 start.bat          One-click launcher
 ```
 
-## Deploy online (open it from any device)
-
-GitHub Pages can only show the website's pages. WhatsApp needs a **server** running Chrome, so the website at
-`https://rahulkumarsahu991.github.io/Whatsapp-Chat-Export-/` talks to a cloud server that you deploy once.
-In cloud mode, every visitor gets their **own** WhatsApp session, so nobody can see anyone else's chats.
-
-### Option A — Hugging Face Spaces (free, 16 GB RAM)
-
-1. Sign up at huggingface.co, then **New Space**. Set SDK to **Docker**, choose the **Blank** template, and set visibility to **Public**.
-2. In the Space, go to **Files → Add file → Upload files** and upload everything from this repo except `node_modules`.
-   Upload `deploy/huggingface-README.md` as the Space's `README.md`.
-3. Under **Settings → Variables and secrets**, add:
-   - Secret `ACCESS_CODE`: a code of your choice. Visitors must type it before they get a QR. Strongly recommended.
-   - Variable `ALLOWED_ORIGINS` = `https://rahulkumarsahu991.github.io`
-   - Variable `MAX_SESSIONS` = `3` (optional; how many people can be logged in at once)
-4. When the Space shows **Running**, copy its address (for example `https://your-name-whatsapp.hf.space`).
-   Put it in `public/config.js` as `window.EXPORTER_CLOUD_URL = 'https://…';` and push to GitHub.
-
-### Option B — Railway (paid, redeploys on every GitHub push)
-
-**New Project → Deploy from GitHub repo**, then pick this repo. Railway finds the `Dockerfile` by itself.
-Add the same variables (`ACCESS_CODE`, `ALLOWED_ORIGINS`), generate a public domain, then put that URL in `public/config.js`.
-
-### Good to know (cloud)
-
-- Free hosts restart now and then. A restart logs everyone out, so they scan the QR again. Add persistent storage at `/data` to keep logins.
-- Sessions that never scan the QR are closed after 20 minutes (`IDLE_MINUTES`). A linked session unused for 12 hours (`LINKED_IDLE_HOURS`) is unlinked from the phone, and all its files are deleted.
-- WhatsApp does not officially support third-party clients, so use it for your own chats.
-- Test the cloud mode on your PC: run `set CLOUD=1&& node server.js --port=3002`.
-
 ## Changing the design
 
 The styling uses Tailwind CSS v4. After you edit classes in `public/` or the theme in `styles/app.css`, rebuild the CSS:

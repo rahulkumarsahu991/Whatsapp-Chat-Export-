@@ -15,8 +15,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <!-- fonts load without blocking the first paint (system fonts show until they arrive) -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-  <link rel="stylesheet" href="css/app.css">
-  <script src="config.js"></script>
+  <link rel="stylesheet" href="/css/app.css">
 </head>
 <body class="min-h-full overflow-x-hidden bg-ink font-sans text-slate-100 antialiased">
   <div id="demoRibbon" hidden class="pointer-events-none fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border border-amber-300/30 bg-amber-300/15 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200 max-md:hidden">
@@ -377,18 +376,7 @@
 
   <div id="toasts" aria-live="polite" class="fixed inset-x-3 top-[max(0.75rem,env(safe-area-inset-top))] z-[70] flex flex-col gap-2.5 sm:inset-x-auto sm:right-5 sm:top-5 sm:w-[400px]"></div>
 
-  <!-- ================= access code / server message ================= -->
-  <div id="gate" hidden class="fixed inset-0 z-[95] grid place-items-center bg-ink p-4">
-    <form id="gateForm" class="w-full max-w-sm rounded-[28px] border border-white/10 bg-ink-2 p-6 shadow-2xl sm:p-8">
-      <div class="mb-5 grid size-12 place-items-center rounded-2xl bg-wa/15 text-2xl ring-1 ring-wa/30" aria-hidden="true">🔒</div>
-      <h2 id="gateTitle" class="font-display text-2xl font-semibold">Enter access code</h2>
-      <p id="gateText" class="mt-2 text-sm leading-relaxed text-slate-400">This site is private. Ask its owner for the access code.</p>
-      <input id="gateCode" type="password" autocomplete="current-password" placeholder="Access code" class="mt-5 h-12 w-full rounded-xl border border-white/10 bg-white/5 px-4 text-base outline-none transition focus:border-neon-cyan/60 focus:ring-4 focus:ring-neon-cyan/10">
-      <p id="gateError" class="mt-2 min-h-5 text-sm text-rose-300" role="alert"></p>
-      <button id="gateBtn" type="submit" class="mt-2 h-12 w-full rounded-xl bg-gradient-to-r from-wa to-neon-cyan text-base font-semibold text-ink transition active:scale-[0.98]">Continue</button>
-    </form>
-  </div>
-
-  <script type="module" src="js/app.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>

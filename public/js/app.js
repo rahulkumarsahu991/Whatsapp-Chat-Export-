@@ -49,18 +49,7 @@ const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 const fmtNum = (n) => Number(n || 0).toLocaleString('en-IN');
 const setActive = (el, on) => el.toggleAttribute('data-active', !!on);
-// Server address: '' = the site that served this page; GitHub Pages points at the cloud server (config.js).
-const API = String(window.EXPORTER_API || '').replace(/\/+$/, '');
-let sessionToken = ''; // cloud: identifies this visitor's own WhatsApp session
-
-/** URL of a message's photo / video / file ('thumb' = small preview, 'download' = save as file). */
-function mediaUrl(id, kind = '') {
-  const q = new URLSearchParams();
-  if (sessionToken && sessionToken !== 'local') q.set('s', sessionToken); // img/video tags can't send headers
-  if (kind === 'download') q.set('download', '1');
-  const qs = q.toString();
-  return `${API}/api/media/${encodeURIComponent(id)}${kind === 'thumb' ? '/thumb' : ''}${qs ? `?${qs}` : ''}`;
-}
+const mediaUrl = (id) => `/api/media/${encodeURIComponent(id)}`;
 const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* storage unavailable */ } },
@@ -104,13 +93,8 @@ function dayLabel(m) {
   return `${m.day}, ${new Date(m.ts * 1000).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}`;
 }
 
-async function api(path, opts = {}, retry = true) {
-  const res = await fetch(API + path, { ...opts, headers: { 'X-App': '1', 'X-Session': sessionToken, ...(opts.headers || {}) } });
-  if (res.status === 401 && retry) {
-    let body = {};
-    try { body = await res.clone().json(); } catch { /* not json */ }
-    if (body.code === 'NO_SESSION') { await startSession(true); connectSocket(); return api(path, opts, false); }
-  }
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { 'X-App': '1', ...(opts.headers || {}) } });
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try { msg = (await res.json()).error || msg; } catch { /* not json */ }
@@ -436,7 +420,7 @@ function mediaHtml(m) {
       inner = `<img src="${mediaUrl(m.id)}" loading="lazy" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
     } else if (m.thumb) {
       // Videos: only the preview here; the video itself downloads when opened.
-      inner = `<img src="${mediaUrl(m.id, 'thumb')}" loading="lazy" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
+      inner = `<img src="${mediaUrl(m.id)}/thumb" loading="lazy" decoding="async" alt="${esc(m.typeLabel)}" class="size-full ${fit}">`;
     } else {
       inner = `<span class="grid size-full place-items-center text-4xl">${TYPE_ICONS[m.type] || '📎'}</span>`;
     }
@@ -446,7 +430,7 @@ function mediaHtml(m) {
     return `<div class="mb-1 flex items-center gap-2"><span class="text-lg">${TYPE_ICONS[m.type]}</span><audio controls preload="none" src="${mediaUrl(m.id)}" class="h-10 w-60 max-w-full"></audio></div>`;
   }
   if (m.type === 'document') {
-    return `<a href="${mediaUrl(m.id, 'download')}" class="mb-1 flex max-w-72 items-center gap-3 rounded-xl bg-black/25 px-3 py-2.5 transition hover:bg-black/35"><span class="text-2xl">📄</span><span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium">${esc(m.text || 'Document')}</span><span class="text-xs opacity-60">Tap to download</span></span></a>`;
+    return `<a href="${mediaUrl(m.id)}?download=1" class="mb-1 flex max-w-72 items-center gap-3 rounded-xl bg-black/25 px-3 py-2.5 transition hover:bg-black/35"><span class="text-2xl">📄</span><span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium">${esc(m.text || 'Document')}</span><span class="text-xs opacity-60">Tap to download</span></span></a>`;
   }
   return `<span class="mr-1.5 inline-flex items-center gap-1 rounded-md bg-white/10 px-1.5 py-0.5 text-xs font-medium">${TYPE_ICONS[m.type] || '📎'} ${esc(m.typeLabel)}</span>`;
 }
@@ -469,12 +453,12 @@ function tableBodyHtml(m) {
   if (m.type === 'revoked') return `<span class="italic text-slate-400">🚫 ${esc(m.text)}</span>`;
   if (VISUAL.has(m.type)) {
     const thumb = m.thumb
-      ? `<img src="${mediaUrl(m.id, 'thumb')}" loading="lazy" alt="" class="size-10 shrink-0 rounded-md object-cover">`
+      ? `<img src="${mediaUrl(m.id)}/thumb" loading="lazy" alt="" class="size-10 shrink-0 rounded-md object-cover">`
       : `<span class="grid size-10 shrink-0 place-items-center rounded-md bg-white/10">${TYPE_ICONS[m.type] || '📎'}</span>`;
     return `<button type="button" data-media="${esc(m.id)}" class="flex items-center gap-2.5 text-left hover:text-neon-cyan">${thumb}<span>${esc(m.text) || `<span class="text-slate-400">${esc(m.typeLabel)} · view</span>`}</span></button>`;
   }
   if (m.isMedia) {
-    return `<a href="${mediaUrl(m.id, 'download')}" class="hover:text-neon-cyan">${TYPE_ICONS[m.type] || '📎'} ${esc(m.text || m.typeLabel)} <span class="text-xs text-slate-500">download</span></a>`;
+    return `<a href="${mediaUrl(m.id)}?download=1" class="hover:text-neon-cyan">${TYPE_ICONS[m.type] || '📎'} ${esc(m.text || m.typeLabel)} <span class="text-xs text-slate-500">download</span></a>`;
   }
   return bodyHtml(m);
 }
@@ -648,7 +632,7 @@ function openViewer(id) {
   if (!m) return;
   els.viewerTitle.textContent = `${m.name} · ${m.typeLabel}`;
   els.viewerSub.textContent = `${m.date} · ${m.day} · ${m.time}${m.text ? ` — ${m.text}` : ''}`;
-  els.viewerDownload.href = `${mediaUrl(id, 'download')}`;
+  els.viewerDownload.href = `${mediaUrl(id)}?download=1`;
   els.viewerBody.innerHTML = '<div class="size-12 animate-spin rounded-full border-4 border-white/10 border-t-wa border-r-neon-cyan"></div>';
   els.viewer.hidden = false;
   document.body.style.overflow = 'hidden';
@@ -884,188 +868,49 @@ magnetic(els.loadBtn);
 setIncludeMedia(store.get('includeMedia') !== '0', false);
 updateFilterNote();
 
-/* ---------------- server, session & live connection ---------------- */
-const gate = {
-  el: $('#gate'), form: $('#gateForm'), title: $('#gateTitle'), text: $('#gateText'),
-  code: $('#gateCode'), error: $('#gateError'), btn: $('#gateBtn'),
-};
-
-/** Full-screen card that asks for the access code or shows a message; resolves when its button is pressed. */
-function showGate({ title, text, askCode = false, button = 'Continue', error = '' }) {
-  gate.title.textContent = title;
-  gate.text.textContent = text;
-  gate.code.hidden = !askCode;
-  gate.code.value = '';
-  gate.error.textContent = error;
-  gate.btn.textContent = button;
-  gate.btn.disabled = false;
-  gate.el.hidden = false;
-  if (askCode) setTimeout(() => gate.code.focus(), 50);
-  return new Promise((resolve) => {
-    gate.form.onsubmit = (e) => { e.preventDefault(); resolve(gate.code.value.trim()); };
-  });
-}
-function hideGate() { gate.el.hidden = true; }
-
-let serverConfig = null;
-
-/** Asks the server how it runs (PC app or cloud, access code or not). Keeps trying until it answers. */
-async function loadConfig() {
-  for (;;) {
-    if (location.hostname.endsWith('github.io') && !API) {
-      await showGate({
-        title: 'Server not set up yet',
-        text: 'This website needs its WhatsApp server online. The owner has to deploy it and put its address in config.js.',
-        button: 'Check again',
-      });
-      location.reload();
-      return null;
-    }
-    try {
-      const res = await fetch(`${API}/api/config`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(res.statusText);
-      hideGate();
-      return await res.json();
-    } catch {
-      await showGate({
-        title: 'Can’t reach the server',
-        text: API
-          ? 'The WhatsApp server is not answering. If it was asleep it can take a minute to wake up — then try again.'
-          : 'Is the exporter still running? Start it with start.bat, then try again.',
-        button: 'Try again',
-      });
-    }
+/* ---------------- live connection ---------------- */
+const socket = io();
+socket.on('status', renderStatus);
+socket.on('progress', (p) => {
+  if (!els.busy.hidden && p && p.loaded) els.busyText.textContent = `Fetching messages… ${fmtNum(p.loaded)} loaded`;
+});
+socket.on('export-progress', (p) => {
+  if (p.jobId !== state.exportJob) return;
+  if (p.phase === 'excel') {
+    showExportPanel({ title: 'Writing Excel file…', detail: `${fmtNum(p.done - p.failed)} media files saved`, pct: 97 });
+    return;
   }
-}
-
-let starting = null;
-
-/** Gives this browser its own WhatsApp session on a cloud server (reusing the saved one while it lives). */
-function startSession(forceNew = false) {
-  if (!serverConfig || !serverConfig.cloud) {
-    sessionToken = 'local';
-    return Promise.resolve();
+  const pct = p.total ? 5 + (p.done / p.total) * 90 : 50;
+  const detail = p.total
+    ? `Saving photos, videos & files: ${fmtNum(p.done)} / ${fmtNum(p.total)}${p.failed ? ` · ${fmtNum(p.failed)} no longer available` : ''}`
+    : 'No photos or videos in this period — writing Excel…';
+  showExportPanel({ title: 'Exporting…', detail, pct });
+});
+socket.on('export-done', (r) => {
+  if (r.jobId !== state.exportJob) return;
+  state.exportJob = null;
+  state.exportUrl = r.url;
+  setExporting(false);
+  startDownload(r.url);
+  showExportPanel({
+    title: 'Download started',
+    detail: `${r.zipName} — ${fmtNum(r.messages)} messages + ${fmtNum(r.saved)} media files${r.failed ? ` (${fmtNum(r.failed)} no longer available)` : ''}. Check your Downloads.`,
+    pct: 100,
+    done: true,
+  });
+  sparkle(isPhone() ? els.fab : els.exportBtn);
+});
+socket.on('export-error', (r) => {
+  if (r.jobId !== state.exportJob) return;
+  state.exportJob = null;
+  setExporting(false);
+  showExportPanel({ title: 'Export failed', detail: r.error, pct: 100, failed: true });
+});
+socket.on('disconnect', () => {
+  if (state.screen === 'login') {
+    els.statusPill.dataset.state = 'error';
+    els.statusText.textContent = 'Lost connection to the exporter — is the server window still open?';
+  } else {
+    toast('Lost connection to the exporter server. Restart it with start.bat.', 'error', 8000);
   }
-  if (starting) return starting;
-  starting = (async () => {
-    const saved = store.get('waSession');
-    if (saved && !forceNew) {
-      sessionToken = saved;
-      const res = await fetch(`${API}/api/status`, { headers: { 'X-Session': saved } }).catch(() => null);
-      if (res && res.ok) return;
-    }
-    let code = store.get('waAccessCode') || '';
-    let error = '';
-    for (;;) {
-      if (serverConfig.needCode && !code) {
-        code = await showGate({ title: 'Enter access code', text: 'This site is private. Ask its owner for the access code.', askCode: true, error });
-      }
-      gate.btn.disabled = true;
-      const res = await fetch(`${API}/api/session`, {
-        method: 'POST',
-        headers: { 'X-App': '1', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
-      }).catch(() => null);
-      gate.btn.disabled = false;
-      const body = res ? await res.json().catch(() => ({})) : {};
-      if (res && res.ok && body.token) {
-        sessionToken = body.token;
-        store.set('waSession', sessionToken);
-        if (code) store.set('waAccessCode', code);
-        hideGate();
-        return;
-      }
-      if (res && res.status === 401) {
-        code = '';
-        store.set('waAccessCode', '');
-        error = body.error || 'Wrong access code.';
-        continue;
-      }
-      await showGate({
-        title: res && res.status === 503 ? 'Server is busy' : 'Couldn’t start',
-        text: body.error || 'The server did not answer. Please try again.',
-        button: 'Try again',
-      });
-    }
-  })().finally(() => { starting = null; });
-  return starting;
-}
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = () => reject(new Error(`Could not load ${src}`));
-    document.head.append(s);
-  });
-}
-
-let socket = null;
-function connectSocket() {
-  if (socket) socket.disconnect();
-  socket = io(API || undefined, { auth: { token: sessionToken }, transports: ['websocket', 'polling'] });
-  socket.on('status', renderStatus);
-  socket.on('progress', (p) => {
-    if (!els.busy.hidden && p && p.loaded) els.busyText.textContent = `Fetching messages… ${fmtNum(p.loaded)} loaded`;
-  });
-  socket.on('export-progress', (p) => {
-    if (p.jobId !== state.exportJob) return;
-    if (p.phase === 'excel') {
-      showExportPanel({ title: 'Writing Excel file…', detail: `${fmtNum(p.done - p.failed)} media files saved`, pct: 97 });
-      return;
-    }
-    const pct = p.total ? 5 + (p.done / p.total) * 90 : 50;
-    const detail = p.total
-      ? `Saving photos, videos & files: ${fmtNum(p.done)} / ${fmtNum(p.total)}${p.failed ? ` · ${fmtNum(p.failed)} no longer available` : ''}`
-      : 'No photos or videos in this period — writing Excel…';
-    showExportPanel({ title: 'Exporting…', detail, pct });
-  });
-  socket.on('export-done', (r) => {
-    if (r.jobId !== state.exportJob) return;
-    state.exportJob = null;
-    state.exportUrl = API + r.url;
-    setExporting(false);
-    startDownload(API + r.url);
-    showExportPanel({
-      title: 'Download started',
-      detail: `${r.zipName} — ${fmtNum(r.messages)} messages + ${fmtNum(r.saved)} media files${r.failed ? ` (${fmtNum(r.failed)} no longer available)` : ''}. Check your Downloads.`,
-      pct: 100,
-      done: true,
-    });
-    sparkle(isPhone() ? els.fab : els.exportBtn);
-  });
-  socket.on('export-error', (r) => {
-    if (r.jobId !== state.exportJob) return;
-    state.exportJob = null;
-    setExporting(false);
-    showExportPanel({ title: 'Export failed', detail: r.error, pct: 100, failed: true });
-  });
-  // Cloud: the server closed this session (idle too long, or it restarted) — start a fresh one.
-  socket.on('session-expired', async () => {
-    store.set('waSession', '');
-    toast('Your session ended — starting a fresh one.', 'info', 6000);
-    await startSession(true);
-    connectSocket();
-  });
-  socket.on('disconnect', (reason) => {
-    if (reason === 'io client disconnect') return;
-    const msg = serverConfig && serverConfig.cloud
-      ? 'Connection to the server dropped — reconnecting…'
-      : 'Lost connection to the exporter — is the server window still open?';
-    if (state.screen === 'login') {
-      els.statusPill.dataset.state = 'error';
-      els.statusText.textContent = msg;
-    } else {
-      toast(msg, 'error', 8000);
-    }
-  });
-}
-
-(async () => {
-  serverConfig = await loadConfig();
-  if (!serverConfig) return;
-  await startSession();
-  await loadScript(`${API}/socket.io/socket.io.js`);
-  connectSocket();
-})();
+});

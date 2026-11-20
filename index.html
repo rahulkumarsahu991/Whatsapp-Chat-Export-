@@ -1,12 +1,6 @@
 <!doctype html>
 <html lang="en" class="h-full">
 <head>
-  <script>
-    // Opened as a website (GitHub Pages): go straight to the app. Opened from the folder: show the launcher below.
-    if (/^https?:$/.test(location.protocol) && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
-      location.replace('public/' + location.search + location.hash);
-    }
-  </script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WhatsApp Chat Exporter</title>
@@ -21,7 +15,7 @@
     <div class="animate-rise">
       <div class="mb-7 inline-flex items-center gap-2.5 rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs font-medium text-slate-300 backdrop-blur">
         <span class="relative flex size-2"><span class="absolute inline-flex size-full animate-ping rounded-full bg-wa opacity-75"></span><span class="relative inline-flex size-2 rounded-full bg-wa"></span></span>
-        Runs 100% on this computer
+        <span data-local>Runs 100% on this computer</span><span data-web hidden>Free · runs on your own PC · chats never uploaded</span>
       </div>
       <h1 class="font-display text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl">
         Export WhatsApp<br><span class="text-gradient">chats &amp; media.</span>
@@ -42,8 +36,10 @@
       <div id="card" class="tilt relative w-full max-w-md rounded-[28px] border border-white/10 bg-ink-2 p-6 shadow-[0_30px_80px_-30px_rgb(0_0_0/0.9)] sm:p-8">
 
         <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Get started</p>
-        <h2 class="mt-1 font-display text-2xl font-semibold">Start the exporter</h2>
-        <ol class="mt-6 grid gap-3">
+        <h2 class="mt-1 font-display text-2xl font-semibold"><span data-local>Start the exporter</span><span data-web hidden>Get the app (Windows)</span></h2>
+
+        <!-- opened from the downloaded folder -->
+        <ol data-local class="mt-6 grid gap-3">
           <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-wa/15 font-display text-sm font-bold text-wa ring-1 ring-wa/30">01</span>
             <span class="text-sm text-slate-300">Double-click <code class="rounded-md bg-white/10 px-1.5 py-0.5 font-semibold text-white">start.bat</code> in this folder. Keep the black window open.</span>
@@ -58,11 +54,33 @@
           </li>
         </ol>
 
+        <!-- opened from the website (GitHub Pages): the app itself has to run on the visitor's PC -->
+        <ol data-web hidden class="mt-6 grid gap-3">
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-wa/15 font-display text-sm font-bold text-wa ring-1 ring-wa/30">01</span>
+            <span class="text-sm text-slate-300"><b class="text-white">Download the app</b> (button below) and extract the ZIP. One time only: install <a href="https://nodejs.org" target="_blank" rel="noopener" class="font-semibold text-neon-cyan underline-offset-2 hover:underline">Node.js LTS</a>.</span>
+          </li>
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-cyan/15 font-display text-sm font-bold text-neon-cyan ring-1 ring-neon-cyan/30">02</span>
+            <span class="text-sm text-slate-300">In the extracted folder, double-click <code class="rounded-md bg-white/10 px-1.5 py-0.5 font-semibold text-white">start.bat</code>. The app opens at <b class="text-white">localhost:3000</b>.</span>
+          </li>
+          <li class="flex items-start gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <span class="grid size-9 shrink-0 place-items-center rounded-xl bg-neon-violet/15 font-display text-sm font-bold text-violet-300 ring-1 ring-neon-violet/30">03</span>
+            <span class="text-sm text-slate-300">Scan the QR in WhatsApp → <b class="text-white">Linked devices</b>, pick a group, press <b class="text-white">Download ZIP</b>.</span>
+          </li>
+        </ol>
+
         <div class="mt-6 flex flex-wrap gap-3">
+          <a data-web hidden id="downloadApp" href="https://github.com/rahulkumarsahu991/Whatsapp-Chat-Export-/archive/refs/heads/main.zip" class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-wa to-neon-cyan px-5 py-2.5 text-sm font-semibold text-ink shadow-[0_12px_30px_-10px_rgb(37_211_102/0.8)] transition hover:-translate-y-0.5">
+            <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+            Download app (ZIP)
+          </a>
           <a id="openApp" href="http://localhost:3000" class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-wa to-neon-cyan px-5 py-2.5 text-sm font-semibold text-ink shadow-[0_12px_30px_-10px_rgb(37_211_102/0.8)] transition hover:-translate-y-0.5">Open the app</a>
-          <button id="retryBtn" type="button" class="rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-sm font-semibold transition hover:bg-white/15">Check again</button>
+          <button data-local id="retryBtn" type="button" class="rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-sm font-semibold transition hover:bg-white/15">Check again</button>
+          <a data-web hidden href="https://github.com/rahulkumarsahu991/Whatsapp-Chat-Export-" target="_blank" rel="noopener" class="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-sm font-semibold transition hover:bg-white/15">View on GitHub</a>
         </div>
-        <p class="mt-5 text-xs text-slate-500">No login? Double-click <code class="rounded bg-white/10 px-1 text-slate-300">start-demo.bat</code> to try it with sample groups.</p>
+        <p data-local class="mt-5 text-xs text-slate-500">No login? Double-click <code class="rounded bg-white/10 px-1 text-slate-300">start-demo.bat</code> to try it with sample groups.</p>
+        <p data-web hidden class="mt-5 text-xs leading-relaxed text-slate-500">Already running it on this PC? Press <b class="text-slate-300">Open the app</b>. Want to look around first? Double-click <code class="rounded bg-white/10 px-1 text-slate-300">start-demo.bat</code> for sample groups, no login needed.</p>
       </div>
     </div>
   </main>
@@ -72,6 +90,17 @@
     const statusEl = document.getElementById('status');
     const statusText = document.getElementById('statusText');
     let timer = null;
+
+    // Opened as a website (e.g. GitHub Pages) instead of from the downloaded folder: the app has to run
+    // on the visitor's own PC, so show download steps and don't probe localhost (browsers block or prompt).
+    const hosted = location.protocol.startsWith('http') && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    if (hosted) {
+      document.querySelectorAll('[data-local]').forEach((el) => { el.hidden = true; });
+      document.querySelectorAll('[data-web]').forEach((el) => { el.hidden = false; });
+      const open = document.getElementById('openApp');
+      open.className = 'inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-sm font-semibold transition hover:bg-white/15';
+      statusText.textContent = 'Download it, run start.bat, then scan the QR code';
+    }
 
     async function check() {
       try {
@@ -89,7 +118,7 @@
     }
     async function loop() { if (!(await check())) timer = setTimeout(loop, 3000); }
     document.getElementById('retryBtn').addEventListener('click', () => { clearTimeout(timer); loop(); });
-    loop();
+    if (!hosted) loop();
 
     const card = document.getElementById('card');
     if (matchMedia('(hover: hover)').matches) {
