@@ -278,6 +278,9 @@ class SheetSync extends EventEmitter {
     try {
       meta = await getMeta(id);
     } catch (err) {
+      if (/has not been used|is disabled|SERVICE_DISABLED|API.*not.*enabled/i.test(err.message)) {
+        throw userError('The Google Sheets API is not switched on for the bot yet. In Google Cloud open APIs & Services → Library → Google Sheets API → Enable, wait a minute, then try again.', 503);
+      }
       if (err.status === 403 || err.status === 404) {
         throw userError(`The bot can't open this sheet. In the sheet press Share, add ${botEmail()} as Editor, then try again.`);
       }

@@ -23,3 +23,7 @@ Thumbs.db
 google-service-account*.json
 sheet-sync.json
 keep.json
+# any other JSON dropped in the project folder (e.g. a downloaded key) stays out of git
+/*.json
+!/package.json
+!/package-lock.json
