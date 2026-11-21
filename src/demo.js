@@ -92,7 +92,10 @@ class DemoService extends EventEmitter {
     this.ensureReady();
     await wait(150);
     const chat = this.groups.find((g) => g.info.id === chatId) || this.direct.find((d) => d.info.id === chatId);
-    return chat ? chat.messages.filter((m) => m.ts >= sinceTs).sort((a, b) => a.ts - b.ts) : [];
+    // DEMO_LATE_HISTORY=1 (tests): like a fresh real login, only the last day is there for the first minute
+    const lateCut = process.env.DEMO_LATE_HISTORY === '1' && Date.now() - (this.readyAt || 0) < 60000
+      ? Math.floor(Date.now() / 1000) - 86400 : 0;
+    return chat ? chat.messages.filter((m) => m.ts >= sinceTs && m.ts >= lateCut).sort((a, b) => a.ts - b.ts) : [];
   }
 
   /** Demo: a new message arrives every 15 seconds in a random chat (shows the live sheet sync). */
@@ -246,6 +249,7 @@ class DemoService extends EventEmitter {
       this.set('loading', `Syncing your chats… ${p}%`);
     }
     this.me = { name: 'Demo User', number: '919800000000', id: 'me' };
+    this.readyAt = Date.now();
     this.set('ready', 'Connected');
     this.startLiveMessages();
   }

@@ -5,7 +5,10 @@
 //    Its key file lives in C:\Users\<you>\WhatsAppChatExporter\google-service-account.json.
 //  • Every group gets its own tab; all personal chats share one "Personal Chats" tab.
 //  • Old messages are copied once (from the chosen date), then new ones every few seconds.
-//  • Progress is saved per chat, so after a restart it carries on where it stopped (no duplicates).
+//  • Every message written is remembered (a short hash of its id), so nothing is written twice, and
+//    messages WhatsApp only loads later (a fresh login gets its history in the background) are filled
+//    in by "gap checks"; a hidden Sort column keeps each tab in time order after such fills.
+//  • Progress is saved, so after a restart or a log out + scan of the same account it carries on.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -26,8 +29,10 @@ const ROWS_PER_WRITE = 1500; // keeps each request well under Google's size limi
 const LIVE_DELAY_MS = 4000; // new messages are collected for a few seconds, then written together
 const FULL_PASS_MS = 10 * 60 * 1000; // safety net: re-check every chat now and then
 const MAX_CELL = 45000; // Google's limit is 50,000 characters per cell
+// After a fresh login, WhatsApp delivers older history over several minutes: look for it again then.
+const GAP_CHECKS_MIN = String(process.env.SHEETS_GAP_CHECKS_MIN || '3,10,30,90').split(',').map(Number).filter((n) => n > 0);
 
-const GROUP_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type'];
+const GROUP_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type', 'Sort'];
 const PERSONAL_HEAD = ['Chat', ...GROUP_HEAD];
 const PERSONAL_KEY = '_personal';
 const PERSONAL_TITLE = 'Personal Chats';
@@ -172,28 +177,40 @@ async function batchUpdate(id, requests) {
   }
   await sleep(50);
   const book = dryLoad(id);
+  const value = (v) => (v.userEnteredValue.numberValue !== undefined ? v.userEnteredValue.numberValue : v.userEnteredValue.stringValue);
   for (const r of requests) {
     if (r.addSheet) book.sheets.push({ sheetId: r.addSheet.properties.sheetId, title: r.addSheet.properties.title, rows: [] });
     if (r.appendCells) {
       const tab = book.sheets.find((s) => s.sheetId === r.appendCells.sheetId);
       if (!tab) throw Object.assign(new Error(`No grid with id: ${r.appendCells.sheetId}`), { status: 400 });
-      for (const row of r.appendCells.rows) tab.rows.push(row.values.map((v) => v.userEnteredValue.stringValue));
+      for (const row of r.appendCells.rows) tab.rows.push(row.values.map(value));
+    }
+    if (r.sortRange) {
+      const tab = book.sheets.find((s) => s.sheetId === r.sortRange.range.sheetId);
+      const col = r.sortRange.sortSpecs[0].dimensionIndex;
+      tab.rows = [tab.rows[0], ...tab.rows.slice(1).sort((a, b) => a[col] - b[col])];
     }
   }
   drySave(id, book);
 }
 
 const cell = (v) => ({ userEnteredValue: { stringValue: String(v ?? '').slice(0, MAX_CELL) } });
+const numCell = (n) => ({ userEnteredValue: { numberValue: n } });
 const boldCell = (v) => ({ ...cell(v), userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.86, green: 0.97, blue: 0.9 } } });
 
-/** Requests that create a new tab with a bold, frozen header row and readable column widths. */
+/** Requests that create a new tab: bold frozen header, wide Message column, hidden Sort column. */
 function newTabRequests(sheetId, title, head) {
   const msgCol = head.indexOf('Message');
+  const sortCol = head.indexOf('Sort');
+  const columns = (start, properties, fields) => ({
+    updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: start, endIndex: start + 1 }, properties, fields },
+  });
   return [
     // (2 rows: Google refuses to freeze every row of a sheet; rows are added as messages come in)
     { addSheet: { properties: { sheetId, title, gridProperties: { rowCount: 2, columnCount: head.length, frozenRowCount: 1 } } } },
     { appendCells: { sheetId, rows: [{ values: head.map(boldCell) }], fields: 'userEnteredValue,userEnteredFormat(textFormat,backgroundColor)' } },
-    { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: msgCol, endIndex: msgCol + 1 }, properties: { pixelSize: 420 }, fields: 'pixelSize' } },
+    columns(msgCol, { pixelSize: 420 }, 'pixelSize'),
+    columns(sortCol, { hiddenByUser: true }, 'hiddenByUser'),
   ];
 }
 
@@ -204,6 +221,9 @@ function tabTitle(name, taken) {
   taken.add(title.toLowerCase());
   return title;
 }
+
+/** Short, stable fingerprint of a message id (remembered so a message is never written twice). */
+const fingerprint = (id) => crypto.createHash('sha1').update(String(id)).digest('base64url').slice(0, 10);
 
 // ---------------------------------------------------------------------------
 // Sync of one WhatsApp login
@@ -221,24 +241,31 @@ class SheetSync extends EventEmitter {
     this.file = file;
     this.cfg = null;
     try { this.cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* not connected yet */ }
+    this.written = new Map(); // chat id -> Set of fingerprints (loaded from cfg.written)
+    if (this.cfg) for (const [k, v] of Object.entries(this.cfg.written || {})) this.written.set(k, new Set(v ? v.split(',') : []));
     this.dirty = new Set();
     this.running = false;
     this.again = false;
-    this.needFull = true;
+    this.needFull = 'cursor'; // what the next full pass does: 'cursor' (new messages) or 'gaps' (everything since the start date)
     this.phase = 'idle';
     this.progress = { done: 0, total: 0 };
     this.error = '';
+    this.pending = [];
     this.liveTimer = null;
     this.retryTimer = null;
+    this.gapTimers = [];
     this.onActivity = (chatId) => this.markDirty(chatId);
-    this.onStatus = (st) => { if (st.state === 'ready' && this.enabled) { this.needFull = true; this.kick(); } };
+    this.onStatus = (st) => this.statusChanged(st);
     wa.on('chat-activity', this.onActivity);
     wa.on('status', this.onStatus);
-    this.fullTimer = setInterval(() => { if (this.enabled) { this.needFull = true; this.kick(); } }, FULL_PASS_MS);
+    this.fullTimer = setInterval(() => this.requestPass('cursor'), FULL_PASS_MS);
     this.fullTimer.unref();
   }
 
   get enabled() { return !!(this.cfg && this.cfg.enabled); }
+
+  /** Old (first version) sheets have no Sort column: they only get new messages, no gap filling. */
+  get canFillGaps() { return !!(this.cfg && this.cfg.version >= 2); }
 
   status() {
     const c = this.cfg || {};
@@ -255,6 +282,7 @@ class SheetSync extends EventEmitter {
       rows: c.rows || 0,
       lastWriteAt: c.lastWriteAt || 0,
       error: this.error,
+      oldFormat: this.enabled && !this.canFillGaps,
     };
   }
 
@@ -262,11 +290,46 @@ class SheetSync extends EventEmitter {
 
   save() {
     if (!this.cfg) return;
+    this.cfg.written = {};
+    for (const [k, set] of this.written) this.cfg.written[k] = [...set].join(',');
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       fs.writeFileSync(`${this.file}.tmp`, JSON.stringify(this.cfg));
       fs.renameSync(`${this.file}.tmp`, this.file);
     } catch (err) { console.warn('[sheets] could not save progress:', err.message); }
+  }
+
+  /** WhatsApp connected / disconnected. On connect: same account → carry on (and look for late history). */
+  statusChanged(st) {
+    if (!this.enabled) return;
+    if (st.state !== 'ready') {
+      if (this.phase !== 'waiting' && this.phase !== 'error') { this.phase = 'waiting'; this.changed(); }
+      return;
+    }
+    const account = st.me && st.me.id;
+    if (this.cfg.account && account && this.cfg.account !== account) {
+      this.phase = 'error';
+      this.error = `This sheet belongs to another WhatsApp account (+${this.cfg.account.split('@')[0]}). Stop sync and connect a new sheet for this one.`;
+      this.changed();
+      return;
+    }
+    if (!this.cfg.account && account) { this.cfg.account = account; this.save(); }
+    this.error = '';
+    this.requestPass('cursor');
+    this.scheduleGapChecks(); // a fresh login keeps loading older history for a while
+  }
+
+  requestPass(kind) {
+    if (!this.enabled) return;
+    if (kind === 'gaps' && !this.canFillGaps) kind = 'cursor';
+    if (this.needFull !== 'gaps') this.needFull = kind;
+    this.kick();
+  }
+
+  scheduleGapChecks() {
+    this.gapTimers.forEach(clearTimeout);
+    this.gapTimers = GAP_CHECKS_MIN.map((m) => setTimeout(() => this.requestPass('gaps'), m * 60 * 1000));
+    this.gapTimers.forEach((t) => t.unref());
   }
 
   /** Connect a sheet (or resume the same one) and start copying. */
@@ -288,15 +351,23 @@ class SheetSync extends EventEmitter {
     }
     const sinceKey = SINCE_DAYS[since] ? String(since) : 'all';
     const sinceTs = sinceKey === 'all' ? 0 : Math.floor(Date.now() / 1000) - SINCE_DAYS[sinceKey] * 86400;
+    const me = this.wa.status().me;
     const resume = this.cfg && this.cfg.spreadsheetId === id;
-    this.cfg = resume
-      ? { ...this.cfg, enabled: true, title: meta.title }
-      : { enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, connectedAt: Date.now(), tabs: {}, cursors: {}, rows: 0, lastWriteAt: 0 };
+    if (resume) {
+      this.cfg = { ...this.cfg, enabled: true, title: meta.title };
+    } else {
+      this.cfg = {
+        version: 2, enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, account: (me && me.id) || '',
+        connectedAt: Date.now(), tabs: {}, cursors: {}, written: {}, rows: 0, lastWriteAt: 0,
+      };
+      this.written = new Map();
+      this.titles = null;
+    }
     this.error = '';
     this.save();
     console.log(`[sheets] ${resume ? 'resumed' : 'connected'} "${meta.title}" (old messages: ${sinceKey === 'all' ? 'all available' : `last ${sinceKey} days`})`);
-    this.needFull = true;
-    this.kick();
+    this.requestPass(resume ? 'cursor' : 'gaps');
+    this.scheduleGapChecks();
     this.changed();
     return this.status();
   }
@@ -306,15 +377,8 @@ class SheetSync extends EventEmitter {
     this.phase = 'off';
     clearTimeout(this.liveTimer);
     clearTimeout(this.retryTimer);
+    this.gapTimers.forEach(clearTimeout);
     console.log('[sheets] sync stopped');
-    this.changed();
-  }
-
-  /** Logged out: forget the sheet and its progress. */
-  forget() {
-    this.stop();
-    this.cfg = null;
-    try { fs.rmSync(this.file, { force: true }); } catch { /* gone */ }
     this.changed();
   }
 
@@ -322,6 +386,7 @@ class SheetSync extends EventEmitter {
     clearInterval(this.fullTimer);
     clearTimeout(this.liveTimer);
     clearTimeout(this.retryTimer);
+    this.gapTimers.forEach(clearTimeout);
     this.wa.off('chat-activity', this.onActivity);
     this.wa.off('status', this.onStatus);
     this.cfg = this.cfg && { ...this.cfg, enabled: false }; // stops a running pass (nothing is saved)
@@ -346,17 +411,20 @@ class SheetSync extends EventEmitter {
       do {
         this.again = false;
         if (!this.enabled) break;
-        if (this.wa.status().state !== 'ready') { this.phase = 'waiting'; return; } // resumes on "ready"
+        const st = this.wa.status();
+        if (st.state !== 'ready') { this.phase = 'waiting'; return; } // resumes on "ready"
+        if (this.cfg.account && st.me && st.me.id && st.me.id !== this.cfg.account) return; // other account
         if (this.needFull) {
-          this.needFull = false;
-          await this.fullPass();
+          const kind = this.needFull;
+          this.needFull = null;
+          await this.fullPass(kind);
         }
         if (this.dirty.size) {
           const ids = [...this.dirty];
           this.dirty.clear();
           const chats = await this.wa.listChatsForSync();
           const byId = new Map(chats.map((c) => [c.id, c]));
-          for (const id of ids) if (byId.has(id)) await this.collect(byId.get(id));
+          for (const id of ids) if (byId.has(id)) await this.collect(byId.get(id), false);
           await this.flush();
         }
       } while (this.enabled && (this.again || this.dirty.size || this.needFull));
@@ -366,92 +434,127 @@ class SheetSync extends EventEmitter {
       }
     } catch (err) {
       this.pending = [];
-      this.memCursors = null;
       this.error = err.status === 403 || err.status === 404
         ? `The bot lost access to the sheet. Share it again with ${botEmail()} as Editor.`
         : err.message;
       this.phase = 'error';
       console.warn('[sheets]', this.error);
       clearTimeout(this.retryTimer);
-      this.retryTimer = setTimeout(() => { this.needFull = true; this.kick(); }, 60 * 1000);
+      this.retryTimer = setTimeout(() => this.requestPass(this.canFillGaps ? 'gaps' : 'cursor'), 60 * 1000);
     } finally {
       this.running = false;
       this.changed();
     }
   }
 
-  /** Every chat with messages newer than what the sheet already has. */
-  async fullPass() {
+  /**
+   * 'cursor': chats with messages newer than what the sheet has.
+   * 'gaps':   every chat active since the start date, compared message by message (fills late history).
+   */
+  async fullPass(kind) {
+    const gaps = kind === 'gaps' && this.canFillGaps;
     const chats = (await this.wa.listChatsForSync())
       .filter((c) => c.t && c.t >= this.cfg.sinceTs)
-      .filter((c) => { const cur = this.cursor(c.id); return !cur || c.t > cur.ts; })
+      .filter((c) => { if (gaps) return true; const cur = this.cfg.cursors[c.id]; return !cur || c.t > cur.ts; })
       .sort((a, b) => b.t - a.t); // most recently active first
     if (!chats.length) return;
-    const backfill = !this.cfg.backfilled;
-    this.phase = backfill ? 'backfill' : 'catchup';
+    const first = !this.cfg.backfilled;
+    this.phase = first ? 'backfill' : gaps ? 'gaps' : 'catchup';
     this.progress = { done: 0, total: chats.length };
     this.changed();
+    const before = this.cfg.rows || 0;
     for (const chat of chats) {
       if (!this.enabled) return;
-      await this.collect(chat);
+      await this.collect(chat, gaps);
       if (this.pendingRows() >= ROWS_PER_WRITE) await this.flush();
       this.progress.done += 1;
       this.changed();
     }
     await this.flush();
-    if (backfill) {
+    if (first) {
       this.cfg.backfilled = true;
       this.save();
       console.log(`[sheets] old messages copied: ${this.cfg.rows} rows in ${Object.keys(this.cfg.tabs).length} tabs`);
+    } else if (gaps && this.cfg.rows > before) {
+      console.log(`[sheets] filled in ${this.cfg.rows - before} messages WhatsApp loaded later`);
     }
   }
 
-  // Progress per chat: { ts, ids } = newest timestamp written and the message ids written at that second.
-  cursor(chatId) {
-    return (this.memCursors && this.memCursors[chatId]) || this.cfg.cursors[chatId] || null;
+  pendingRows() { return this.pending.reduce((n, p) => n + p.rows.length, 0); }
+
+  isWritten(chatId, msgId) {
+    const set = this.written.get(chatId);
+    return !!set && set.has(fingerprint(msgId));
   }
 
-  pendingRows() { return (this.pending || []).reduce((n, p) => n + p.rows.length, 0); }
-
-  /** Reads a chat's messages newer than its cursor and queues them as rows. */
-  async collect(chat) {
-    const cur = this.cursor(chat.id);
-    const since = cur ? cur.ts : this.cfg.sinceTs;
-    const msgs = (await this.wa.fetchForSync(chat.id, since))
-      .filter((m) => !cur || m.ts > cur.ts || (m.ts === cur.ts && !cur.ids.includes(m.id)));
+  /**
+   * Queues the chat's messages that are not in the sheet yet.
+   * fromStart: look at everything since the start date (gap check); otherwise only after the newest written one.
+   */
+  async collect(chat, fromStart) {
+    const cur = this.cfg.cursors[chat.id];
+    const since = fromStart || !cur ? this.cfg.sinceTs : cur.ts;
+    const queued = new Set(this.pending.flatMap((p) => (p.chatId === chat.id ? p.prints : [])));
+    let msgs = (await this.wa.fetchForSync(chat.id, since)).filter((m) => m.ts >= this.cfg.sinceTs);
+    if (this.canFillGaps) {
+      msgs = msgs.filter((m) => !this.isWritten(chat.id, m.id) && !queued.has(fingerprint(m.id)));
+    } else {
+      // first-version sheets: only what comes after the newest written message
+      msgs = msgs.filter((m) => !cur || m.ts > cur.ts || (m.ts === cur.ts && !(cur.ids || []).includes(m.id)));
+    }
     if (!msgs.length) return;
     const personal = !chat.isGroup;
+    let seq = 0;
+    let lastTs = -1;
     const rows = msgs.map((m) => {
-      const row = [m.date, m.time, m.day, m.name, m.phone, m.text, m.typeLabel];
-      return personal ? [chat.name, ...row] : row;
+      seq = m.ts === lastTs ? seq + 1 : 0; // keeps WhatsApp's order for messages in the same second
+      lastTs = m.ts;
+      const row = [cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), cell(m.text), cell(m.typeLabel)];
+      if (this.canFillGaps) row.push(numCell(m.ts + Math.min(seq, 999) / 1000));
+      return personal ? [cell(chat.name), ...row] : row;
     });
-    const last = msgs[msgs.length - 1].ts;
-    const prevIds = cur && cur.ts === last ? cur.ids : [];
-    const next = { ts: last, ids: [...prevIds, ...msgs.filter((m) => m.ts === last).map((m) => m.id)].slice(-200) };
-    this.pending = this.pending || [];
-    this.pending.push({ key: personal ? PERSONAL_KEY : chat.id, chat, rows, chatId: chat.id, next });
-    this.memCursors = { ...(this.memCursors || {}), [chat.id]: next };
+    const maxTs = msgs[msgs.length - 1].ts;
+    const minTs = msgs[0].ts;
+    this.pending.push({
+      key: personal ? PERSONAL_KEY : chat.id,
+      chat,
+      chatId: chat.id,
+      rows,
+      prints: msgs.map((m) => fingerprint(m.id)),
+      minTs,
+      maxTs,
+      lastIds: msgs.filter((m) => m.ts === maxTs).map((m) => m.id),
+    });
   }
 
-  /** Writes all queued rows (creating tabs as needed), then saves the cursors. */
+  /** Writes all queued rows (creating tabs, re-sorting a tab when older messages were added), then saves. */
   async flush() {
-    const pending = this.pending || [];
+    const pending = this.pending;
     if (!pending.length) return;
     const id = this.cfg.spreadsheetId;
     if (!this.titles) this.titles = new Set((await getMeta(id)).tabs.map((t) => t.title.toLowerCase()));
 
     const requests = [];
     const created = [];
+    const resort = new Map(); // sheetId -> sort column
+    const tabMax = {};
     for (const p of pending) {
       let tab = this.cfg.tabs[p.key];
       if (!tab) {
         const personal = p.key === PERSONAL_KEY;
-        tab = { sheetId: crypto.randomInt(1e6, 2e9), title: tabTitle(personal ? PERSONAL_TITLE : p.chat.name, this.titles) };
-        requests.push(...newTabRequests(tab.sheetId, tab.title, personal ? PERSONAL_HEAD : GROUP_HEAD));
+        const head = personal ? PERSONAL_HEAD : GROUP_HEAD;
+        tab = { sheetId: crypto.randomInt(1e6, 2e9), title: tabTitle(personal ? PERSONAL_TITLE : p.chat.name, this.titles), sortCol: head.indexOf('Sort'), maxTs: 0 };
+        requests.push(...newTabRequests(tab.sheetId, tab.title, head));
         this.cfg.tabs[p.key] = tab;
         created.push(p.key);
       }
-      requests.push({ appendCells: { sheetId: tab.sheetId, rows: p.rows.map((r) => ({ values: r.map(cell) })), fields: 'userEnteredValue' } });
+      requests.push({ appendCells: { sheetId: tab.sheetId, rows: p.rows.map((values) => ({ values })), fields: 'userEnteredValue' } });
+      const max = tabMax[p.key] !== undefined ? tabMax[p.key] : (tab.maxTs || 0);
+      if (this.canFillGaps && tab.sortCol >= 0 && p.minTs < max) resort.set(tab.sheetId, tab.sortCol); // older than what is there
+      tabMax[p.key] = Math.max(max, p.maxTs);
+    }
+    for (const [sheetId, sortCol] of resort) {
+      requests.push({ sortRange: { range: { sheetId, startRowIndex: 1 }, sortSpecs: [{ dimensionIndex: sortCol, sortOrder: 'ASCENDING' }] } });
     }
 
     try {
@@ -462,18 +565,31 @@ class SheetSync extends EventEmitter {
       // A tab we made was deleted in the sheet: forget it so the next pass creates it again.
       if (err.status === 400 && /grid|sheet ?id/i.test(err.message)) {
         const live = new Set((await getMeta(id)).tabs.map((t) => t.sheetId));
-        for (const [k, t] of Object.entries(this.cfg.tabs)) if (!live.has(t.sheetId)) delete this.cfg.tabs[k];
+        for (const [k, t] of Object.entries(this.cfg.tabs)) {
+          if (live.has(t.sheetId)) continue;
+          delete this.cfg.tabs[k];
+          // its chats start over, so the re-created tab gets all their messages again
+          const chatIds = k === PERSONAL_KEY ? Object.keys(this.cfg.cursors).filter((c) => !c.endsWith('@g.us')) : [k];
+          for (const c of chatIds) { delete this.cfg.cursors[c]; this.written.delete(c); }
+        }
         this.save();
       }
       throw err;
     }
 
-    const rows = pending.reduce((n, p) => n + p.rows.length, 0);
-    for (const p of pending) this.cfg.cursors[p.chatId] = p.next;
+    const rows = this.pendingRows();
+    for (const p of pending) {
+      const set = this.written.get(p.chatId) || new Set();
+      p.prints.forEach((f) => set.add(f));
+      this.written.set(p.chatId, set);
+      const cur = this.cfg.cursors[p.chatId];
+      if (!cur || p.maxTs > cur.ts) this.cfg.cursors[p.chatId] = { ts: p.maxTs, ids: p.lastIds };
+      else if (p.maxTs === cur.ts) cur.ids = [...new Set([...(cur.ids || []), ...p.lastIds])].slice(-200);
+    }
+    for (const [k, max] of Object.entries(tabMax)) if (this.cfg.tabs[k]) this.cfg.tabs[k].maxTs = max;
     this.cfg.rows = (this.cfg.rows || 0) + rows;
     this.cfg.lastWriteAt = Date.now();
     this.pending = [];
-    this.memCursors = null;
     this.save();
     this.changed();
   }

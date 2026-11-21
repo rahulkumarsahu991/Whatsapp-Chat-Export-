@@ -306,7 +306,7 @@ api.post('/logout', route(async (req, res) => {
     res.set('Set-Cookie', cookie('wa_guest', '', { maxAge: 0, secure: isHttps(req) }));
     return res.json({ ok: true, ended: true });
   }
-  req.s.sync.forget();
+  // The sheet setting stays: after scanning the same account again, the sync carries on by itself.
   await req.s.wa.logout();
   res.json({ ok: true });
 }));

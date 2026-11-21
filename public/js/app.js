@@ -884,10 +884,11 @@ function renderSync(st) {
 
   els.syncSheetLink.href = st.sheetUrl;
   els.syncSheetTitle.textContent = st.sheetTitle || 'Your Google Sheet';
-  const busy = st.phase === 'backfill' || st.phase === 'catchup';
+  const busy = st.phase === 'backfill' || st.phase === 'catchup' || st.phase === 'gaps';
   const phases = {
     backfill: `Copying old messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     catchup: `Catching up on new messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
+    gaps: `Checking for older messages WhatsApp loaded later… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     live: '✅ Live — new messages are added automatically',
     waiting: '⏳ Waiting for WhatsApp to connect…',
     error: '⚠️ Sync problem — retrying every minute',
@@ -897,8 +898,11 @@ function renderSync(st) {
   els.syncBarBox.hidden = !busy;
   els.syncBar.style.width = `${st.total ? Math.round((st.done / st.total) * 100) : 5}%`;
   els.syncStats.textContent = `${fmtNum(st.rows)} messages in the sheet${st.lastWriteAt ? ` · last update ${timeAgo(st.lastWriteAt)}` : ''}`;
-  els.syncError.hidden = !st.error;
-  els.syncError.textContent = st.error || '';
+  const oldFormat = st.oldFormat
+    ? 'This sheet was connected with the first version: it gets new messages, but older ones WhatsApp loaded late are not filled in. For a complete sheet: Stop sync, make a new sheet and connect that.'
+    : '';
+  els.syncError.hidden = !st.error && !oldFormat;
+  els.syncError.textContent = st.error || oldFormat;
 }
 
 async function openSyncPanel() {
@@ -1109,7 +1113,7 @@ els.backBtn.addEventListener('click', () => els.shell.classList.remove('show-cha
 els.logoutBtn.addEventListener('click', async () => {
   const question = state.guest
     ? 'Log out? This app unlinks from your WhatsApp and deletes your chats, photos and files from it.'
-    : 'Log out? This unlinks the exporter from your WhatsApp and clears downloaded media from this computer. You can scan again any time.';
+    : 'Log out? This unlinks the exporter from your WhatsApp and clears downloaded media from this computer. Google Sheet sync pauses and carries on by itself after you scan the same account again.';
   if (!confirm(question)) return;
   try {
     const r = await (await api('/api/logout', { method: 'POST' })).json();
