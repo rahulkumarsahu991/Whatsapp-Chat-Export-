@@ -156,6 +156,10 @@
           <button id="refreshBtn" title="Refresh chat list" aria-label="Refresh chat list" class="group grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white active:scale-95">
             <svg class="size-[18px] group-[.spinning]:animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
           </button>
+          <button id="syncBtn" title="Google Sheet sync" aria-label="Google Sheet sync" class="relative grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white active:scale-95">
+            <svg class="size-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M10 9v12"/></svg>
+            <span id="syncDot" hidden class="absolute -right-0.5 -top-0.5 size-3 rounded-full border-2 border-ink-2 bg-wa"></span>
+          </button>
           <button id="logoutBtn" title="Log out" aria-label="Log out" class="grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-500/15 hover:text-rose-200 active:scale-95">
             <svg class="size-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></svg>
           </button>
@@ -358,6 +362,66 @@
         <span id="sheetExportLabel">Download ZIP</span>
       </button>
       <button data-close class="mt-2 h-12 w-full rounded-2xl text-sm font-medium text-slate-400 transition active:bg-white/5">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ================= Google Sheet sync ================= -->
+  <div id="syncPanel" hidden role="dialog" aria-modal="true" aria-labelledby="syncTitle" class="fixed inset-0 z-[78] grid items-end sm:place-items-center">
+    <div data-close class="absolute inset-0 bg-black/70"></div>
+    <div class="animate-sheet relative max-h-[92dvh] w-full overflow-y-auto rounded-t-[28px] border-t border-white/10 bg-ink-2 px-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-4 shadow-2xl sm:max-w-lg sm:rounded-[28px] sm:border sm:p-7">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Automatic backup</p>
+          <h3 id="syncTitle" class="mt-1 font-display text-xl font-semibold">Google Sheet sync</h3>
+        </div>
+        <button data-close aria-label="Close" class="grid size-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-white/10 hover:text-white">✕</button>
+      </div>
+      <p class="mt-2 text-sm leading-relaxed text-slate-400">All your chats — every group gets its own tab, personal chats share one tab — copied into your Google Sheet, and new messages added automatically.</p>
+
+      <!-- not set up on this computer -->
+      <div id="syncNotReady" hidden class="mt-5 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm leading-relaxed text-amber-100">
+        Google Sheets is not set up on this app yet. The owner of this computer has to add the Google bot key once (see the README, “Google Sheet sync”).
+      </div>
+
+      <!-- connect -->
+      <form id="syncForm" hidden class="mt-5 grid gap-4">
+        <ol class="grid gap-3 text-sm text-slate-300">
+          <li class="flex gap-3"><span class="grid size-7 shrink-0 place-items-center rounded-lg bg-wa/15 text-xs font-bold text-wa">1</span><span>Make a new Google Sheet — <a href="https://sheets.new" target="_blank" rel="noopener" class="font-semibold text-wa underline-offset-2 hover:underline">sheets.new</a></span></li>
+          <li class="flex gap-3"><span class="grid size-7 shrink-0 place-items-center rounded-lg bg-neon-cyan/15 text-xs font-bold text-neon-cyan">2</span>
+            <span class="min-w-0 flex-1">Press <b class="text-white">Share</b>, add this email as <b class="text-white">Editor</b>:
+              <button id="botEmail" type="button" title="Tap to copy" class="mt-1.5 block w-full truncate rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left font-mono text-xs text-slate-200 transition hover:border-wa/50"></button>
+            </span>
+          </li>
+          <li class="flex gap-3"><span class="grid size-7 shrink-0 place-items-center rounded-lg bg-neon-violet/15 text-xs font-bold text-violet-300">3</span><span class="min-w-0 flex-1">Paste the sheet's link here:
+            <input id="sheetLink" type="url" inputmode="url" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/…" class="mt-1.5 h-11 w-full rounded-xl border border-white/15 bg-black/40 px-3 text-base text-white placeholder:text-slate-600 focus:border-wa focus:outline-none sm:text-sm"></span></li>
+        </ol>
+        <label class="grid gap-1.5 text-sm text-slate-300">Old messages to copy
+          <select id="syncSince" class="h-11 rounded-xl border border-white/15 bg-black/40 px-3 text-base text-white focus:border-wa focus:outline-none sm:text-sm [&>option]:bg-ink-2">
+            <option value="7">Last 7 days</option>
+            <option value="30" selected>Last 30 days</option>
+            <option value="90">Last 3 months</option>
+            <option value="365">Last 1 year</option>
+            <option value="all">Everything available (slow for big accounts)</option>
+          </select>
+        </label>
+        <p id="syncGuestNote" hidden class="rounded-xl border border-white/10 bg-black/30 px-3.5 py-2.5 text-xs leading-relaxed text-slate-400">To keep your sheet updated, your WhatsApp stays linked to this app (it is no longer logged out when you close the page). Stop any time with “Stop sync”, or remove the device in WhatsApp → Linked devices.</p>
+        <button id="syncConnectBtn" type="submit" class="flex h-12 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-wa to-neon-cyan font-semibold text-ink transition active:scale-[0.98] disabled:opacity-60">Connect &amp; start sync</button>
+      </form>
+
+      <!-- connected -->
+      <div id="syncOn" hidden class="mt-5 grid gap-4">
+        <a id="syncSheetLink" target="_blank" rel="noopener" class="flex items-center gap-3 rounded-2xl border border-wa/30 bg-wa/10 p-4 transition hover:bg-wa/15">
+          <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-wa text-lg">📊</span>
+          <span class="min-w-0 flex-1"><span id="syncSheetTitle" class="block truncate font-semibold"></span><span class="text-xs text-emerald-100/70">Open the sheet ↗</span></span>
+        </a>
+        <div class="rounded-2xl border border-white/10 bg-black/30 p-4">
+          <p id="syncPhase" class="text-sm font-medium"></p>
+          <div id="syncBarBox" hidden class="mt-3 h-2 overflow-hidden rounded-full bg-white/10"><i id="syncBar" class="block h-full w-0 rounded-full bg-gradient-to-r from-wa to-neon-cyan transition-[width] duration-500"></i></div>
+          <p id="syncStats" class="mt-2 text-xs text-slate-400"></p>
+          <p id="syncError" hidden class="mt-2 text-xs text-rose-300"></p>
+        </div>
+        <button id="syncStopBtn" type="button" class="h-11 rounded-2xl border border-white/15 text-sm font-medium text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-500/10 hover:text-rose-200">Stop sync</button>
+      </div>
     </div>
   </div>
 

@@ -45,9 +45,13 @@ const GROUPS = [
   { name: 'Goa Trip Planning 🌴', members: 6, days: 30, count: 260 },
 ];
 
+const DATA_ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
+
 class DemoService extends EventEmitter {
-  constructor() {
+  constructor(opts = {}) {
     super();
+    const id = opts.id || 'exporter';
+    this.paths = { sync: path.join(DATA_ROOT, 'demo-sync', `${id}.json`) }; // Google Sheets progress (demo)
     this.state = 'idle';
     this.message = '';
     this.qr = null;
@@ -55,6 +59,61 @@ class DemoService extends EventEmitter {
     this.me = null;
     this.progress = 0;
     this.groups = this.buildGroups();
+    this.direct = this.buildDirect();
+  }
+
+  /** A few one-to-one chats, so the "Personal Chats" sheet tab has something to show. */
+  buildDirect() {
+    const now = Math.floor(Date.now() / 1000);
+    return PEOPLE.slice(0, 4).map((name, i) => {
+      const id = `91990000000${i}@c.us`;
+      const messages = Array.from({ length: 6 }, (_, k) => {
+        const ts = now - (i + 1) * 5400 - (5 - k) * 600;
+        const fromMe = k % 2 === 1;
+        return {
+          id: `d${i}_${k}`, ts, ...timeParts(ts), fromMe, authorId: fromMe ? 'me' : id,
+          name: fromMe ? 'Demo User (You)' : name, phone: fromMe ? '+919800000000' : `+${id.split('@')[0]}`,
+          forwarded: false, type: 'chat', typeLabel: TYPE_LABELS.chat, text: LINES[(i * 3 + k) % LINES.length], isMedia: false, thumb: false,
+        };
+      });
+      return { info: { id, name, isGroup: false }, messages };
+    });
+  }
+
+  listChatsForSync() {
+    this.ensureReady();
+    return [
+      ...this.groups.map((g) => ({ id: g.info.id, name: g.info.name, isGroup: true, t: g.messages[g.messages.length - 1].ts })),
+      ...this.direct.map((d) => ({ id: d.info.id, name: d.info.name, isGroup: false, t: d.messages[d.messages.length - 1].ts })),
+    ];
+  }
+
+  async fetchForSync(chatId, sinceTs) {
+    this.ensureReady();
+    await wait(150);
+    const chat = this.groups.find((g) => g.info.id === chatId) || this.direct.find((d) => d.info.id === chatId);
+    return chat ? chat.messages.filter((m) => m.ts >= sinceTs).sort((a, b) => a.ts - b.ts) : [];
+  }
+
+  /** Demo: a new message arrives every 15 seconds in a random chat (shows the live sheet sync). */
+  startLiveMessages() {
+    clearInterval(this.liveTimer);
+    let n = 0;
+    this.liveTimer = setInterval(() => {
+      if (this.state !== 'ready') return;
+      const chats = [...this.groups, ...this.direct];
+      const chat = chats[n % chats.length];
+      n += 1;
+      const ts = Math.floor(Date.now() / 1000);
+      const who = chat.info.isGroup ? PEOPLE[n % PEOPLE.length] : chat.info.name;
+      chat.messages.push({
+        id: `live_${ts}_${n}`, ts, ...timeParts(ts), fromMe: false, authorId: `live${n % 5}`, name: who, phone: '+919811111111',
+        forwarded: false, type: 'chat', typeLabel: TYPE_LABELS.chat, text: `(live) ${LINES[n % LINES.length]}`, isMedia: false, thumb: false,
+      });
+      if (chat.last) chat.last = chat.messages[chat.messages.length - 1];
+      this.emit('chat-activity', chat.info.id);
+    }, 15000);
+    this.liveTimer.unref();
   }
 
   status() {
@@ -188,6 +247,7 @@ class DemoService extends EventEmitter {
     }
     this.me = { name: 'Demo User', number: '919800000000', id: 'me' };
     this.set('ready', 'Connected');
+    this.startLiveMessages();
   }
 
   ensureReady() {
@@ -212,19 +272,22 @@ class DemoService extends EventEmitter {
       preview: g.last.text || g.last.typeLabel,
     }));
     const now = Math.floor(Date.now() / 1000);
-    const direct = PEOPLE.slice(0, 4).map((name, i) => ({
-      id: `91990000000${i}@c.us`, name, isGroup: false, participants: 0,
-      timestamp: now - (i + 1) * 5400, unread: 0, pinned: false, archived: false, preview: LINES[i + 3],
-    }));
+    const direct = this.direct.map((d) => {
+      const last = d.messages[d.messages.length - 1];
+      return {
+        id: d.info.id, name: d.info.name, isGroup: false, participants: 0,
+        timestamp: last.ts || now, unread: 0, pinned: false, archived: false, preview: last.text,
+      };
+    });
     return [...groups, ...direct].sort((a, b) => b.timestamp - a.timestamp);
   }
 
   async getMessages(chatId, params) {
     this.ensureReady();
     await wait(params.limit === 'all' || params.limit > 200 ? 2500 : 700); // like WhatsApp: more history takes longer
-    const g = this.groups.find((x) => x.info.id === chatId);
+    const g = this.groups.find((x) => x.info.id === chatId) || this.direct.find((x) => x.info.id === chatId);
     if (!g) {
-      const err = new Error('Demo mode only has sample messages for the groups.');
+      const err = new Error('Demo mode only has sample messages for these chats.');
       err.status = 404;
       throw err;
     }
@@ -285,18 +348,22 @@ class DemoService extends EventEmitter {
   }
 
   async logout() {
+    clearInterval(this.liveTimer);
     this.me = null;
     this.progress = 0;
     this.start();
   }
 
-  async destroy() {}
+  async destroy() {
+    clearInterval(this.liveTimer);
+  }
 
   async purge() {
+    clearInterval(this.liveTimer);
     this.state = 'closed';
   }
 
-  static clearGuests() {}
+  static clearGuests() { return []; }
 }
 
 module.exports = DemoService;

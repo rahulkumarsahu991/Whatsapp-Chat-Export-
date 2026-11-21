@@ -68,6 +68,37 @@ Good to know:
 
 **Demo mode:** `start-demo.bat` opens the same interface with sample groups and needs no login. Click the QR code to simulate a scan.
 
+## Google Sheet sync (automatic)
+
+Press the **sheet button (📊)** next to Log out to copy all your chats into a Google Sheet. After that, new messages are added automatically every few seconds.
+- Every **group** gets its own tab.
+- All **personal chats** share one **Personal Chats** tab, with a "Chat" column.
+- Columns: Date · Time · Day · Sender · Phone · Message · Type.
+- **Old messages:** choose how far back to copy: 7 days, 30 days, 3 months, 1 year, or everything available. Copying everything can take a long time for big accounts.
+- If the app was off, it catches up on the missed messages when it starts again. Nothing is written twice.
+- Photos and videos show as "Photo" / "Video" with their caption. The files themselves are not uploaded.
+- **Stop sync** keeps what is already in the sheet.
+
+**For people using the shared link:** while sync is on, their WhatsApp stays linked to this PC, even after a restart, so their sheet keeps updating. To stop, they press **Stop sync**, **Log out**, or remove the device in WhatsApp → Linked devices. Up to 3 guests can be logged in at a time, syncing or not.
+
+### One-time setup: the Google "bot" (owner of this PC only)
+
+The app writes to sheets through a free Google **service account**, a bot with its own email. Each person shares their sheet with that email. Nobody hands over a Google password.
+
+1. Open <https://console.cloud.google.com/> and sign in with your Google account.
+2. At the top, click the **project picker**, then **New project**. Name it, for example `WhatsApp Sheet Sync`, and click **Create**. Then select that project.
+3. Open <https://console.cloud.google.com/apis/library/sheets.googleapis.com> and click **Enable**.
+4. Go to **IAM & Admin → Service Accounts → + Create service account**. Name it `sheet-bot`, click **Create and continue**, then **Done**. It needs no roles.
+5. Click the new service account, then **Keys → Add key → Create new key → JSON → Create**. A `.json` file downloads.
+6. Rename it to **`google-service-account.json`** and move it to **`C:\Users\<you>\WhatsAppChatExporter\`**.
+7. Restart `start-mobile.bat` (or `start.bat`). The window then says `Google Sheets sync: ready (bot: …@….iam.gserviceaccount.com)`.
+
+Keep that key file private: anyone who has it can write to the sheets shared with the bot. It is never uploaded to GitHub. If it leaks, delete the key in the Google console (step 5) and make a new one.
+
+Google limits:
+- The bot can make about 60 writes a minute. The app batches messages, so that is plenty.
+- One spreadsheet holds up to 10 million cells, roughly 1.4 million messages.
+
 ## What the Excel file contains
 
 | Sheet | Columns |

@@ -28,6 +28,11 @@ const els = {
   modeBadge: $('#modeBadge'), guestNote: $('#guestNote'),
   pairBox: $('#pairBox'), pairToggle: $('#pairToggle'), pairForm: $('#pairForm'), pairPhone: $('#pairPhone'), pairBtn: $('#pairBtn'),
   pairCodeBox: $('#pairCodeBox'), pairCode: $('#pairCode'), pairCancel: $('#pairCancel'),
+  syncBtn: $('#syncBtn'), syncDot: $('#syncDot'), syncPanel: $('#syncPanel'), syncNotReady: $('#syncNotReady'),
+  syncForm: $('#syncForm'), botEmail: $('#botEmail'), sheetLink: $('#sheetLink'), syncSince: $('#syncSince'),
+  syncGuestNote: $('#syncGuestNote'), syncConnectBtn: $('#syncConnectBtn'), syncOn: $('#syncOn'),
+  syncSheetLink: $('#syncSheetLink'), syncSheetTitle: $('#syncSheetTitle'), syncPhase: $('#syncPhase'),
+  syncBarBox: $('#syncBarBox'), syncBar: $('#syncBar'), syncStats: $('#syncStats'), syncError: $('#syncError'), syncStopBtn: $('#syncStopBtn'),
 };
 
 const state = {
@@ -359,7 +364,9 @@ async function startSession() {
     if (state.guest) {
       els.modeBadge.textContent = 'Your own private login';
       els.guestNote.hidden = false;
-      els.guestNote.textContent = `Private & temporary: only you see your chats. When you log out, or close this page for ${info.idleMinutes || 20} minutes, this app unlinks from your WhatsApp and deletes your data.`;
+      els.guestNote.textContent = info.persistent
+        ? 'Private: only you see your chats. Google Sheet sync is on, so your WhatsApp stays linked to this app — stop it with the sheet button (📊) or by logging out.'
+        : `Private & temporary: only you see your chats. When you log out, or close this page for ${info.idleMinutes || 20} minutes, this app unlinks from your WhatsApp and deletes your data.`;
       els.logoutBtn.title = 'Log out & delete my data';
     } else if (!info.local) {
       els.modeBadge.textContent = 'Your WhatsApp, from anywhere';
@@ -852,6 +859,87 @@ function closeViewer() {
   document.body.style.overflow = '';
 }
 
+/* ---------------- Google Sheet sync ---------------- */
+let syncStatus = null;
+const timeAgo = (ms) => {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(ms).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+};
+
+function renderSync(st) {
+  if (!st) return;
+  syncStatus = st;
+  els.syncDot.hidden = !st.enabled;
+  els.syncDot.classList.toggle('bg-rose-500', st.phase === 'error');
+  els.syncDot.classList.toggle('bg-wa', st.phase !== 'error');
+  els.syncNotReady.hidden = st.configured || st.enabled;
+  els.syncForm.hidden = !st.configured || st.enabled;
+  els.syncOn.hidden = !st.enabled;
+  els.botEmail.textContent = st.botEmail || '';
+  els.syncGuestNote.hidden = !state.guest;
+  if (!st.enabled) return;
+
+  els.syncSheetLink.href = st.sheetUrl;
+  els.syncSheetTitle.textContent = st.sheetTitle || 'Your Google Sheet';
+  const busy = st.phase === 'backfill' || st.phase === 'catchup';
+  const phases = {
+    backfill: `Copying old messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
+    catchup: `Catching up on new messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
+    live: '✅ Live — new messages are added automatically',
+    waiting: '⏳ Waiting for WhatsApp to connect…',
+    error: '⚠️ Sync problem — retrying every minute',
+    idle: 'Starting…',
+  };
+  els.syncPhase.textContent = phases[st.phase] || 'Starting…';
+  els.syncBarBox.hidden = !busy;
+  els.syncBar.style.width = `${st.total ? Math.round((st.done / st.total) * 100) : 5}%`;
+  els.syncStats.textContent = `${fmtNum(st.rows)} messages in the sheet${st.lastWriteAt ? ` · last update ${timeAgo(st.lastWriteAt)}` : ''}`;
+  els.syncError.hidden = !st.error;
+  els.syncError.textContent = st.error || '';
+}
+
+async function openSyncPanel() {
+  els.syncPanel.hidden = false;
+  document.body.style.overflow = 'hidden';
+  try { renderSync(await (await api('/api/sync')).json()); } catch (err) { toast(err.message, 'error'); }
+}
+function closeSyncPanel() {
+  els.syncPanel.hidden = true;
+  document.body.style.overflow = '';
+}
+
+async function connectSheet(e) {
+  e.preventDefault();
+  const sheet = els.sheetLink.value.trim();
+  if (!/docs\.google\.com\/spreadsheets\/d\//.test(sheet)) {
+    toast('Paste the full link of your Google Sheet', 'error');
+    els.sheetLink.focus();
+    return;
+  }
+  els.syncConnectBtn.disabled = true;
+  els.syncConnectBtn.textContent = 'Checking the sheet…';
+  try {
+    renderSync(await (await postJson('/api/sync', { sheet, since: els.syncSince.value })).json());
+    toast('Connected — copying your chats to the sheet', 'success');
+  } catch (err) {
+    toast(err.message, 'error', 9000);
+  } finally {
+    els.syncConnectBtn.disabled = false;
+    els.syncConnectBtn.textContent = 'Connect & start sync';
+  }
+}
+
+async function stopSync() {
+  const question = state.guest
+    ? 'Stop the sync? The sheet keeps what it has. Your login becomes temporary again (logged out when you leave).'
+    : 'Stop the sync? The sheet keeps what it has; new messages are no longer added.';
+  if (!confirm(question)) return;
+  try { renderSync(await (await api('/api/sync/stop', { method: 'POST' })).json()); toast('Sync stopped', 'success'); } catch (err) { toast(err.message, 'error'); }
+}
+
 /* ---------------- export ---------------- */
 function fileNameFrom(disposition) {
   if (!disposition) return '';
@@ -1067,6 +1155,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!els.viewer.hidden) closeViewer();
   else if (!els.exportSheet.hidden) closeSheet();
+  else if (!els.syncPanel.hidden) closeSyncPanel();
 });
 
 els.exportClose.addEventListener('click', () => { els.exportPanel.hidden = true; });
@@ -1083,6 +1172,15 @@ updateFilterNote();
 // WebSocket first: connects in one round trip (polling first needed 3-4 over the shared link).
 const socket = io({ autoConnect: false, transports: ['websocket', 'polling'], tryAllTransports: true });
 socket.on('status', renderStatus);
+socket.on('sync', renderSync);
+els.syncBtn.addEventListener('click', openSyncPanel);
+els.syncPanel.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSyncPanel(); });
+els.syncForm.addEventListener('submit', connectSheet);
+els.syncStopBtn.addEventListener('click', stopSync);
+els.botEmail.addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(els.botEmail.textContent); toast('Email copied', 'success', 2000); } catch { /* clipboard blocked */ }
+});
+setInterval(() => { if (!els.syncPanel.hidden && syncStatus) renderSync(syncStatus); }, 30000); // refresh "x min ago"
 socket.on('session-ended', (r) => showEnded(r && r.why === 'app stopped'
   ? 'The app was stopped on the host computer, so your WhatsApp was unlinked and your data deleted.'
   : undefined));

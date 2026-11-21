@@ -18,3 +18,8 @@ people-cache.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Google Sheets bot key: secret, kept in %USERPROFILE%\WhatsAppChatExporter (never commit it)
+google-service-account*.json
+sheet-sync.json
+keep.json

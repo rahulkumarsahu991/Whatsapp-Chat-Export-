@@ -36,6 +36,7 @@ function sessionPaths(id) {
       // Chrome's HTTP cache lives outside the session folder, so WhatsApp Web's ~10 MB of scripts are
       // downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
       browserCache: path.join(SESSION_ROOT, 'browser-cache'),
+      sync: path.join(SESSION_ROOT, 'sheet-sync.json'), // Google Sheets sync settings + progress
     };
   }
   const root = path.join(GUEST_ROOT, id); // everything of one guest in one folder → one delete removes it all
@@ -47,6 +48,8 @@ function sessionPaths(id) {
     media: path.join(root, 'media-cache'),
     people: path.join(root, 'people-cache.json'),
     browserCache: path.join(root, 'browser-cache'),
+    sync: path.join(root, 'sheet-sync.json'),
+    keep: path.join(root, 'keep.json'), // present while this guest syncs to a sheet: login kept across restarts
   };
 }
 const PEOPLE_TTL = 7 * 24 * 60 * 60 * 1000;
@@ -282,6 +285,12 @@ class WhatsAppService extends EventEmitter {
       });
       this.set('qr', 'Scan this QR code with WhatsApp → Linked devices');
     });
+    // Any new message (received, or sent from the phone): tells the Google Sheets sync which chat changed.
+    client.on('message_create', (m) => {
+      if (!current() || this.state !== 'ready') return;
+      const chatId = idStr(m.fromMe ? m.to : m.from) || idStr(m.id && m.id.remote);
+      if (chatId && !/status@broadcast|@newsletter|@broadcast$/.test(chatId)) this.emit('chat-activity', chatId);
+    });
     // "Link with phone number instead": WhatsApp makes a new code every 3 minutes.
     client.on('code', (code) => {
       if (!current() || !this.pairPhone || this.state === 'ready') return;
@@ -507,11 +516,22 @@ class WhatsAppService extends EventEmitter {
     if (this.guest) removeFolder(this.paths.root);
   }
 
-  /** At start-up: remove guest logins left over from a run that ended abruptly. */
+  /**
+   * At start-up: remove temporary guest logins left over from the last run, and return the ones that
+   * sync to a Google Sheet (they have keep.json) so they can be started again: [{ id, token }].
+   */
   static clearGuests() {
-    if (!fs.existsSync(GUEST_ROOT)) return;
+    if (!fs.existsSync(GUEST_ROOT)) return [];
     killStaleBrowsers(GUEST_ROOT);
-    removeFolder(GUEST_ROOT);
+    const kept = [];
+    for (const id of fs.readdirSync(GUEST_ROOT)) {
+      const dir = path.join(GUEST_ROOT, id);
+      let keep = null;
+      try { keep = JSON.parse(fs.readFileSync(path.join(dir, 'keep.json'), 'utf8')); } catch { /* temporary guest */ }
+      if (keep && /^[A-Za-z0-9_-]{32}$/.test(keep.token || '') && /^g[0-9a-f]{12}$/.test(id)) kept.push({ id, token: keep.token });
+      else removeFolder(dir);
+    }
+    return kept;
   }
 
   /** Connection details of the hidden WhatsApp Web page, for troubleshooting (no chat data). */
@@ -683,6 +703,39 @@ class WhatsAppService extends EventEmitter {
       this.cache.set(key, { at: Date.now(), data });
       if (this.cache.size > 6) this.cache.delete(this.cache.keys().next().value);
       return data;
+    });
+  }
+
+  /** Chats for the Google Sheets sync: id, name, group or not, and the time of the last message. */
+  async listChatsForSync() {
+    this.ensureReady();
+    const list = await this.quickChatList(this.client);
+    return list
+      .filter((c) => !c.id.endsWith('@broadcast'))
+      .map((c) => ({ id: c.id, name: c.name, isGroup: c.isGroup, t: c.timestamp }));
+  }
+
+  /**
+   * Messages of one chat from `sinceTs` (unix seconds) on, oldest first, ready for the sheet.
+   * Starts small (new messages are already in memory) and loads further back only when needed.
+   */
+  fetchForSync(chatId, sinceTs) {
+    return this.run(async () => {
+      this.ensureReady();
+      const chat = await this.client.getChatById(chatId);
+      let step = 25;
+      let msgs = [];
+      for (;;) {
+        msgs = await chat.fetchMessages({ limit: step });
+        const oldest = msgs.reduce((min, m) => Math.min(min, m.timestamp), Infinity);
+        if (msgs.length < step || oldest < sinceTs || step >= MAX_FETCH) break;
+        step *= 4;
+      }
+      msgs = msgs
+        .filter((m) => !SYSTEM_TYPES.has(m.type) && m.timestamp >= sinceTs)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      await this.resolvePeople(msgs);
+      return msgs.map((m) => this.serialize(m));
     });
   }
 

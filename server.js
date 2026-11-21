@@ -20,6 +20,7 @@ const { Server } = require('socket.io');
 const { parseQuery } = require('./src/format');
 const { buildWorkbook, exportFileName } = require('./src/excel');
 const { prepareZip, streamZip } = require('./src/media');
+const { SheetSync } = require('./src/sheets');
 
 const DEMO = process.argv.includes('--demo') || process.env.DEMO === '1';
 const OPEN_BROWSER = !process.argv.includes('--no-open');
@@ -101,11 +102,19 @@ const sessions = new Map(); // key ('owner' or a guest token) -> session
 const zips = new Map(); // download token -> { pkg, at }
 const ZIP_TTL = 30 * 60 * 1000;
 
-function createSession(key, id, guest) {
+function createSession(key, id, guest, persistent = false) {
   const wa = new Service({ id });
-  const s = { key, wa, guest, room: `s:${key}`, createdAt: Date.now(), lastSeen: Date.now(), sockets: 0, exportJob: null };
-  wa.on('status', (st) => io.to(s.room).emit('status', st));
+  const s = {
+    key, wa, guest, persistent, room: `s:${key}`, createdAt: Date.now(), lastSeen: Date.now(), sockets: 0, exportJob: null, qrSince: 0,
+  };
+  wa.on('status', (st) => {
+    s.qrSince = st.state === 'qr' ? (s.qrSince || Date.now()) : 0;
+    io.to(s.room).emit('status', st);
+  });
   wa.on('progress', (p) => io.to(s.room).emit('progress', p));
+  // Google Sheets sync of this login (settings and progress are saved next to the login).
+  s.sync = new SheetSync(wa, wa.paths.sync);
+  s.sync.on('status', (st) => io.to(s.room).emit('sync', st));
   sessions.set(key, s);
   return s;
 }
@@ -113,11 +122,22 @@ function createSession(key, id, guest) {
 const owner = createSession('owner', 'exporter', false);
 const guestCount = () => [...sessions.values()].filter((s) => s.guest).length;
 
+/** A guest who syncs to a sheet keeps their login across restarts (keep.json); others are temporary. */
+function setPersistent(s, on) {
+  s.persistent = on;
+  if (!s.wa.paths.keep) return; // demo
+  try {
+    if (on) fs.writeFileSync(s.wa.paths.keep, JSON.stringify({ token: s.key, since: new Date().toISOString() }));
+    else fs.rmSync(s.wa.paths.keep, { force: true });
+  } catch (err) { console.warn('[guest] could not save the keep setting:', err.message); }
+}
+
 async function dropGuest(s, why) {
   if (sessions.get(s.key) !== s) return;
   sessions.delete(s.key);
   console.log(`[guest] ${s.key.slice(0, 6)}… closed (${why}) — ${guestCount()}/${MAX_GUESTS} guests`);
   io.to(s.room).emit('session-ended', { why });
+  s.sync.dispose();
   try { await s.wa.purge(); } catch (err) { console.warn('[guest] cleanup failed:', err.message); }
 }
 
@@ -144,6 +164,11 @@ setInterval(() => {
   const now = Date.now();
   for (const s of sessions.values()) {
     if (!s.guest || s.exportJob) continue;
+    if (s.persistent) {
+      // Syncing guests stay — unless WhatsApp asks for a new QR for 15 minutes (they unlinked this device).
+      if (s.qrSince && now - s.qrSince > GUEST_QR_MIN * 60 * 1000) dropGuest(s, 'unlinked from the phone');
+      continue;
+    }
     const idle = now - s.lastSeen;
     const linked = s.wa.status().state === 'ready';
     if (s.sockets === 0 && idle > GUEST_IDLE_MIN * 60 * 1000) dropGuest(s, 'page closed');
@@ -226,7 +251,7 @@ app.post('/api/session', route(async (req, res) => {
   const existing = sessions.get(who.token);
   if (existing) {
     existing.lastSeen = Date.now();
-    return res.json({ role: 'guest', idleMinutes: GUEST_IDLE_MIN });
+    return res.json({ role: 'guest', idleMinutes: GUEST_IDLE_MIN, persistent: existing.persistent });
   }
   if (tooManyStarts(visitorIp(req))) {
     return res.status(429).json({ error: 'Too many new logins from your network — please wait 10 minutes.' });
@@ -234,7 +259,7 @@ app.post('/api/session', route(async (req, res) => {
   if (guestCount() >= MAX_GUESTS) {
     // Make room by closing the longest-idle guest who never linked and has no page open.
     const idle = [...sessions.values()]
-      .filter((s) => s.guest && s.sockets === 0 && !s.exportJob && s.wa.status().state !== 'ready')
+      .filter((s) => s.guest && !s.persistent && s.sockets === 0 && !s.exportJob && s.wa.status().state !== 'ready')
       .sort((a, b) => a.lastSeen - b.lastSeen)[0];
     if (idle) await dropGuest(idle, 'making room');
     else return res.status(503).json({ error: `${MAX_GUESTS} people are using the app right now. Please try again in a few minutes.`, busy: true });
@@ -281,8 +306,35 @@ api.post('/logout', route(async (req, res) => {
     res.set('Set-Cookie', cookie('wa_guest', '', { maxAge: 0, secure: isHttps(req) }));
     return res.json({ ok: true, ended: true });
   }
+  req.s.sync.forget();
   await req.s.wa.logout();
   res.json({ ok: true });
+}));
+
+// ---- Google Sheets sync ----
+api.get('/sync', (req, res) => res.json(req.s.sync.status()));
+
+api.post('/sync', route(async (req, res) => {
+  const s = req.s;
+  if (s.wa.status().state !== 'ready') return res.status(409).json({ error: 'Link your WhatsApp first.' });
+  const st = await s.sync.connect({ sheet: req.body && req.body.sheet, since: req.body && req.body.since });
+  if (s.guest && !s.persistent) {
+    setPersistent(s, true);
+    // Keep this browser's access to the login for a year (the sync itself doesn't need the page open).
+    res.set('Set-Cookie', cookie('wa_guest', s.key, { maxAge: 365 * 24 * 3600, secure: isHttps(req) }));
+    console.log(`[guest] ${s.key.slice(0, 6)}… now syncs to Google Sheets — login kept`);
+  }
+  res.json(st);
+}));
+
+api.post('/sync/stop', route(async (req, res) => {
+  const s = req.s;
+  s.sync.stop();
+  if (s.guest && s.persistent) {
+    setPersistent(s, false); // back to a temporary login (logged out when unused)
+    s.lastSeen = Date.now();
+  }
+  res.json(s.sync.status());
 }));
 
 if (DEMO) {
@@ -389,6 +441,7 @@ io.on('connection', (socket) => {
   s.lastSeen = Date.now();
   socket.join(s.room);
   socket.emit('status', s.wa.status());
+  socket.emit('sync', s.sync.status());
   socket.on('disconnect', () => {
     s.sockets = Math.max(0, s.sockets - 1);
     s.lastSeen = Date.now();
@@ -408,7 +461,10 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-Service.clearGuests(); // guest logins left over from a run that ended abruptly
+// Temporary guest logins left over from the last run are deleted; guests who sync to a Google Sheet
+// keep their login and are started again, so their sheet keeps updating.
+const restored = Service.clearGuests().map(({ id, token }) => createSession(token, id, true, true));
+if (restored.length) console.log(`[guest] ${restored.length} syncing guest login(s) restored`);
 
 server.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;
@@ -419,9 +475,14 @@ server.listen(PORT, '127.0.0.1', () => {
     console.log(`    Each person links their OWN WhatsApp (up to ${MAX_GUESTS} at a time); nobody sees your chats.`);
     console.log(`  * You on your phone: https://${PUBLIC_HOST}/owner  (Google sign-in: ${ALLOWED_EMAILS.join(', ') || 'nobody - run start-mobile.bat --setup'})`);
   }
+  const { isConfigured, botEmail, KEY_FILE } = require('./src/sheets');
+  console.log(isConfigured()
+    ? `  * Google Sheets sync: ready (bot: ${botEmail()})`
+    : `  * Google Sheets sync: not set up yet (put the bot key at ${KEY_FILE})`);
   console.log('  * Keep this window open while the app is in use. Press Ctrl+C to stop.\n');
   if (OPEN_BROWSER && process.platform === 'win32') exec(`start "" "${url}"`);
   owner.wa.start();
+  restored.forEach((s, i) => setTimeout(() => s.wa.start(), (i + 1) * 15000)); // one Chrome at a time
 });
 
 process.on('unhandledRejection', (err) => console.warn('[warn]', (err && err.message) || err));
@@ -434,7 +495,11 @@ async function shutdown() {
   const guests = [...sessions.values()].filter((s) => s.guest);
   const timeout = new Promise((resolve) => setTimeout(resolve, 15000));
   await Promise.race([
-    Promise.all([owner.wa.destroy().catch(() => {}), ...guests.map((s) => dropGuest(s, 'app stopped'))]),
+    Promise.all([
+      owner.wa.destroy().catch(() => {}),
+      // syncing guests keep their login (closed properly, started again next time); the rest are logged out
+      ...guests.map((s) => (s.persistent ? s.wa.destroy().catch(() => {}) : dropGuest(s, 'app stopped'))),
+    ]),
     timeout,
   ]);
   process.exit(0);
