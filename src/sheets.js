@@ -40,7 +40,8 @@ const PERSONAL_HEAD = ['Chat', ...GROUP_HEAD];
 const V1_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type']; // first version (no gap filling)
 const PHOTO_ROW_PX = 110; // rows with a photo are this tall, the others normal
 const TEXT_ROW_PX = 21;
-const PREVIEW_PX = 480; // photo size kept for the sheet (longest side)
+const PREVIEW_PX = 1000; // photo size kept for the sheet (longest side): HD, still under Google's 1-megapixel cell limit
+const PHOTO_VERSION = 2; // 2 = HD photos; sheets with older photos get them redone once
 const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
 const ENRICH_CHUNK = 24; // old rows updated per write while a sheet is being upgraded
 const cleanHost = (h) => String(h || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
@@ -383,7 +384,7 @@ class SheetSync extends EventEmitter {
     this.imageDir = opts.imageDir || '';
     this.imageSid = opts.imageSid || '';
     if (this.imageDir && this.imageSid) imageDirs.set(this.imageSid, this.imageDir);
-    this.photoQueue = new Semaphore(6);
+    this.photoQueue = new Semaphore(3); // fewer at once: full downloads time out less often
     syncs.add(this);
     this.cfg = null;
     try { this.cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* not connected yet */ }
@@ -431,6 +432,7 @@ class SheetSync extends EventEmitter {
       lastWriteAt: c.lastWriteAt || 0,
       error: this.error,
       oldFormat: this.enabled && !this.canFillGaps,
+      upgrade: c.enrichPending === 'hd' ? 'hd' : c.enrichPending ? 'columns' : '',
       photos: !!photoHost() && this.version >= 2,
     };
   }
@@ -508,7 +510,7 @@ class SheetSync extends EventEmitter {
       this.cfg = {
         version: 3, enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, account: (me && me.id) || '',
         connectedAt: Date.now(), tabs: {}, cursors: {}, written: {}, rows: 0, lastWriteAt: 0,
-        imgSecret: crypto.randomBytes(16).toString('hex'),
+        imgSecret: crypto.randomBytes(16).toString('hex'), photoVersion: PHOTO_VERSION,
       };
       this.written = new Map();
       this.titles = null;
@@ -568,7 +570,11 @@ class SheetSync extends EventEmitter {
         if (this.cfg.account && st.me && st.me.id && st.me.id !== this.cfg.account) return; // other account
         if (this.version === 2) await this.upgradeToV3();
         if (this.version >= 3) await this.fixPhotoLinks();
-        if (this.cfg.enrichPending) await this.enrichOldRows();
+        if (this.version >= 3 && !this.cfg.enrichPending && (this.cfg.photoVersion || 1) < PHOTO_VERSION) {
+          this.cfg.enrichPending = 'hd'; // redo the sheet's photos in HD (newest first)
+          this.save();
+        }
+        if (this.cfg.enrichPending) await this.enrichOldRows(this.cfg.enrichPending === 'hd');
         if (this.needFull) {
           const kind = this.needFull;
           this.needFull = null;
@@ -640,32 +646,50 @@ class SheetSync extends EventEmitter {
    * Photos and stickers are downloaded in full; videos (and photos WhatsApp no longer has) use the preview.
    */
   async photoCell(m) {
+    const p = await this.photoFor(m);
+    return p ? p.cell : null;
+  }
+
+  /**
+   * The photo of a message for the sheet: { cell: =IMAGE(link to the copy on this PC), hd }.
+   * Photos and stickers are downloaded in full (HD, up to 1000 px); videos, and photos WhatsApp no
+   * longer has, use WhatsApp's small preview (hd: false). Null when there is nothing to show.
+   */
+  async photoFor(m) {
     const host = photoHost();
     if (!host || !this.imageDir || (!m.thumb && !PHOTO_TYPES.has(m.type))) return null;
     if (!this.cfg.imgSecret) { this.cfg.imgSecret = crypto.randomBytes(16).toString('hex'); this.save(); }
-    const name = crypto.createHmac('sha256', this.cfg.imgSecret).update(String(m.id)).digest('hex').slice(0, 32);
-    const file = path.join(this.imageDir, `${name}.jpg`);
-    if (!fs.existsSync(file)) {
-      const made = await this.photoQueue.run(async () => {
-        let buf = null;
-        if (PHOTO_TYPES.has(m.type)) { try { buf = await this.wa.getPhotoBuffer(m.id); } catch { buf = null; } }
-        if (!buf && m.thumb) { try { buf = ((await this.wa.getThumb(m.id)) || {}).buffer || null; } catch { buf = null; } }
-        if (!buf) return false;
-        try {
-          const jpg = await sharp(buf, { animated: false })
-            .rotate()
-            .resize({ width: PREVIEW_PX, height: PREVIEW_PX, fit: 'inside', withoutEnlargement: true })
-            .flatten({ background: '#ffffff' })
-            .jpeg({ quality: 80 })
-            .toBuffer();
-          fs.mkdirSync(this.imageDir, { recursive: true });
-          fs.writeFileSync(file, jpg);
-          return true;
-        } catch { return false; }
-      });
-      if (!made) return null;
-    }
-    return { userEnteredValue: { formulaValue: `=IMAGE("https://${host}/sheet-img/${this.imageSid}/${name}.jpg")` } };
+    const nameOf = (kind) => crypto.createHmac('sha256', this.cfg.imgSecret).update(`${kind}:${m.id}`).digest('hex').slice(0, 32);
+    const link = (name) => ({ userEnteredValue: { formulaValue: `=IMAGE("https://${host}/sheet-img/${this.imageSid}/${name}.jpg")` } });
+    const hdName = nameOf('hd');
+    const smallName = nameOf('preview');
+    const fileOf = (name) => path.join(this.imageDir, `${name}.jpg`);
+    if (fs.existsSync(fileOf(hdName))) return { cell: link(hdName), hd: true };
+    if (fs.existsSync(fileOf(smallName)) && !PHOTO_TYPES.has(m.type)) return { cell: link(smallName), hd: false };
+    return this.photoQueue.run(async () => {
+      const save = async (buf, name, px, quality) => {
+        const jpg = await sharp(buf, { animated: false })
+          .rotate()
+          .resize({ width: px, height: px, fit: 'inside', withoutEnlargement: true })
+          .flatten({ background: '#ffffff' })
+          .jpeg({ quality, mozjpeg: true })
+          .toBuffer();
+        fs.mkdirSync(this.imageDir, { recursive: true });
+        fs.writeFileSync(fileOf(name), jpg);
+      };
+      if (PHOTO_TYPES.has(m.type)) {
+        let full = null;
+        try { full = await this.wa.getPhotoBuffer(m.id); } catch { full = null; }
+        if (full) {
+          try { await save(full, hdName, PREVIEW_PX, 84); return { cell: link(hdName), hd: true }; } catch { /* broken file */ }
+        }
+      }
+      if (fs.existsSync(fileOf(smallName))) return { cell: link(smallName), hd: false };
+      let thumb = null;
+      if (m.thumb) { try { thumb = ((await this.wa.getThumb(m.id)) || {}).buffer || null; } catch { thumb = null; } }
+      if (!thumb) return null;
+      try { await save(thumb, smallName, PREVIEW_PX, 84); return { cell: link(smallName), hd: false }; } catch { return null; }
+    });
   }
 
   /**
@@ -895,7 +919,7 @@ class SheetSync extends EventEmitter {
    * Fills "Reply to" and "Photo" for rows written before those columns existed. A row is found by its
    * time (Sort value); messages sent in the same second are matched in order, and skipped when unclear.
    */
-  async enrichOldRows() {
+  async enrichOldRows(hdOnly = false) {
     const id = this.cfg.spreadsheetId;
     const chatIds = Object.keys(this.cfg.cursors);
     const chats = new Map((await this.wa.listChatsForSync()).map((c) => [c.id, c]));
@@ -916,7 +940,10 @@ class SheetSync extends EventEmitter {
       for (const [s, list] of msgsAt) {
         const keysAt = (bySecond.get(tabKey) || new Map()).get(s) || [];
         if (keysAt.length !== list.length) continue; // unclear: skip
-        list.forEach((m, j) => { if (m.reply || m.thumb || PHOTO_TYPES.has(m.type)) targets.push({ tabKey, key: keysAt[j], m }); });
+        list.forEach((m, j) => {
+          const wanted = hdOnly ? PHOTO_TYPES.has(m.type) : (m.reply || m.thumb || PHOTO_TYPES.has(m.type));
+          if (wanted) targets.push({ tabKey, key: keysAt[j], m });
+        });
       }
     };
     for (const chatId of chatIds) {
@@ -943,7 +970,8 @@ class SheetSync extends EventEmitter {
     for (let i = 0; i < targets.length; i += ENRICH_CHUNK) {
       if (!this.enabled) return;
       const chunk = targets.slice(i, i + ENRICH_CHUNK);
-      const photos = await Promise.all(chunk.map((t) => this.photoCell(t.m).catch(() => null)));
+      const made = await Promise.all(chunk.map((t) => this.photoFor(t.m).catch(() => null)));
+      const photos = made.map((p) => (p ? p.cell : null));
       const requests = [];
       chunk.forEach((tgt, j) => {
         const tab = this.cfg.tabs[tgt.tabKey];
@@ -953,6 +981,14 @@ class SheetSync extends EventEmitter {
         if ((tab.keys || [])[idx] !== tgt.key) return;
         const row = idx + 1;
         const head = tgt.tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+        if (hdOnly) {
+          // only where an HD photo was made; otherwise the picture already in the sheet stays
+          if (!made[j] || !made[j].hd) return;
+          requests.push({
+            updateCells: { start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: head.indexOf('Photo') }, rows: [{ values: [made[j].cell] }], fields: 'userEnteredValue' },
+          });
+          return;
+        }
         requests.push({
           updateCells: {
             start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: head.indexOf('Reply to') },
@@ -969,8 +1005,9 @@ class SheetSync extends EventEmitter {
       this.phase = 'upgrade';
     }
     this.cfg.enrichPending = false;
+    if (hdOnly) this.cfg.photoVersion = PHOTO_VERSION;
     this.save();
-    console.log(`[sheets] old rows updated with photos / replies: ${targets.length}`);
+    console.log(`[sheets] old rows updated with ${hdOnly ? 'HD photos' : 'photos / replies'}: ${targets.length}`);
   }
 
   /** New messages that came in: write them now. */

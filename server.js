@@ -227,7 +227,7 @@ app.get('/sheet-img/:sid/:name', async (req, res) => {
   res.set('Cache-Control', 'public, max-age=86400');
   if (req.query.s !== 'small') return res.type('jpeg').sendFile(file);
   try {
-    const small = await sharp(file).resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer();
+    const small = await sharp(file).resize({ width: 720, height: 720, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
     res.type('jpeg').send(small);
   } catch {
     res.status(500).end();

@@ -890,7 +890,7 @@ function renderSync(st) {
   els.syncSheetTitle.textContent = st.sheetTitle || 'Your Google Sheet';
   const busy = st.phase === 'backfill' || st.phase === 'catchup' || st.phase === 'gaps' || st.phase === 'upgrade';
   const phases = {
-    upgrade: `Adding photos & replies to the sheet… ${fmtNum(st.done)} / ${fmtNum(st.total)}`,
+    upgrade: `${st.upgrade === 'hd' ? 'Making the sheet’s photos HD' : 'Adding photos & replies to the sheet'}… ${fmtNum(st.done)} / ${fmtNum(st.total)}`,
     backfill: `Copying old messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     catchup: `Catching up on new messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     gaps: `Checking for older messages WhatsApp loaded later… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
