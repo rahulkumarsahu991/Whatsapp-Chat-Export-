@@ -475,6 +475,24 @@ server.on('error', (err) => {
 const restored = Service.clearGuests().map(({ id, token }) => createSession(token, id, true, true));
 if (restored.length) console.log(`[guest] ${restored.length} syncing guest login(s) restored`);
 
+// A second, tiny server that ONLY hands out sheet photos (GET /sheet-img/<login>/<name>.jpg).
+// start-mobile.bat puts a Cloudflare tunnel in front of it, because Google's image fetcher gets
+// ngrok's free-plan warning page instead of the picture. Nothing else of the app is reachable here.
+const PHOTO_PORT = Number(process.env.PHOTO_PORT) || PORT + 11;
+const photoServer = http.createServer((req, res) => {
+  const m = /^\/sheet-img\/([^/?#]+)\/([^/?#]+)$/.exec(String(req.url || '').split('?')[0]);
+  const file = (req.method === 'GET' || req.method === 'HEAD') && m && photoFile(m[1], m[2]);
+  if (!file) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not found'); return; }
+  fs.stat(file, (err, st) => {
+    if (err) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': st.size, 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+    if (req.method === 'HEAD') { res.end(); return; }
+    fs.createReadStream(file).pipe(res);
+  });
+});
+photoServer.on('error', (err) => console.warn(`[photos] photo server not started (${err.code || err.message})`));
+photoServer.listen(PHOTO_PORT, '127.0.0.1');
+
 server.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;
   console.log('\n  * WhatsApp Chat Exporter');

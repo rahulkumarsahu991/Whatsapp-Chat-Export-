@@ -43,7 +43,10 @@ const TEXT_ROW_PX = 21;
 const PREVIEW_PX = 480; // photo size kept for the sheet (longest side)
 const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
 const ENRICH_CHUNK = 24; // old rows updated per write while a sheet is being upgraded
-const publicHost = () => String(process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+const cleanHost = (h) => String(h || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+// Where Google fetches sheet photos from: the Cloudflare tunnel (PHOTO_HOST, set by start-mobile.bat).
+// Google's image fetcher gets ngrok's free-plan warning page, so the ngrok link is only a fallback.
+const photoHost = () => cleanHost(process.env.PHOTO_HOST || process.env.PUBLIC_HOST);
 const PERSONAL_KEY = '_personal';
 const PERSONAL_TITLE = 'Personal Chats';
 
@@ -229,6 +232,10 @@ async function batchUpdate(id, requests) {
       tab.heights = tab.heights || {};
       for (let i = startIndex; i < endIndex; i += 1) tab.heights[i] = r.updateDimensionProperties.properties.pixelSize;
     }
+    if (r.findReplace) {
+      const re = new RegExp(r.findReplace.find, 'g');
+      for (const tab of book.sheets) tab.rows = tab.rows.map((row) => row.map((v) => (typeof v === 'string' && v.startsWith('=') ? v.replace(re, r.findReplace.replacement) : v)));
+    }
     if (r.sortRange) {
       const tab = tabOf(r.sortRange.range.sheetId);
       const col = r.sortRange.sortSpecs[0].dimensionIndex;
@@ -341,6 +348,12 @@ const fingerprint = (id) => crypto.createHash('sha1').update(String(id)).digest(
 // Photos shown in the sheet: =IMAGE("https://<link>/sheet-img/<login>/<name>.jpg"), served by this PC
 // ---------------------------------------------------------------------------
 const imageDirs = new Map(); // login id -> folder with that login's sheet photos
+const syncs = new Set(); // every running sheet sync (told when the photo link changes)
+
+/** The photo link changed (the Cloudflare tunnel restarted): every sheet points its photos there. */
+function photoHostChanged() {
+  for (const s of syncs) if (s.enabled) s.kick();
+}
 
 /** File for GET /sheet-img/:sid/:name (only names this app made), or null. */
 function photoFile(sid, name) {
@@ -370,6 +383,7 @@ class SheetSync extends EventEmitter {
     this.imageSid = opts.imageSid || '';
     if (this.imageDir && this.imageSid) imageDirs.set(this.imageSid, this.imageDir);
     this.photoQueue = new Semaphore(6);
+    syncs.add(this);
     this.cfg = null;
     try { this.cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* not connected yet */ }
     this.written = new Map(); // chat id -> Set of fingerprints (loaded from cfg.written)
@@ -416,7 +430,7 @@ class SheetSync extends EventEmitter {
       lastWriteAt: c.lastWriteAt || 0,
       error: this.error,
       oldFormat: this.enabled && !this.canFillGaps,
-      photos: !!publicHost() && this.version >= 2,
+      photos: !!photoHost() && this.version >= 2,
     };
   }
 
@@ -525,6 +539,7 @@ class SheetSync extends EventEmitter {
     this.wa.off('chat-activity', this.onActivity);
     this.wa.off('status', this.onStatus);
     if (this.imageSid && imageDirs.get(this.imageSid) === this.imageDir) imageDirs.delete(this.imageSid);
+    syncs.delete(this);
     this.cfg = this.cfg && { ...this.cfg, enabled: false }; // stops a running pass (nothing is saved)
   }
 
@@ -551,6 +566,7 @@ class SheetSync extends EventEmitter {
         if (st.state !== 'ready') { this.phase = 'waiting'; return; } // resumes on "ready"
         if (this.cfg.account && st.me && st.me.id && st.me.id !== this.cfg.account) return; // other account
         if (this.version === 2) await this.upgradeToV3();
+        if (this.version >= 3) await this.fixPhotoLinks();
         if (this.cfg.enrichPending) await this.enrichOldRows();
         if (this.needFull) {
           const kind = this.needFull;
@@ -623,7 +639,7 @@ class SheetSync extends EventEmitter {
    * Photos and stickers are downloaded in full; videos (and photos WhatsApp no longer has) use the preview.
    */
   async photoCell(m) {
-    const host = publicHost();
+    const host = photoHost();
     if (!host || !this.imageDir || (!m.thumb && !PHOTO_TYPES.has(m.type))) return null;
     if (!this.cfg.imgSecret) { this.cfg.imgSecret = crypto.randomBytes(16).toString('hex'); this.save(); }
     const name = crypto.createHmac('sha256', this.cfg.imgSecret).update(String(m.id)).digest('hex').slice(0, 32);
@@ -649,6 +665,25 @@ class SheetSync extends EventEmitter {
       if (!made) return null;
     }
     return { userEnteredValue: { formulaValue: `=IMAGE("https://${host}/sheet-img/${this.imageSid}/${name}.jpg")` } };
+  }
+
+  /**
+   * Photo cells link to the current photo address. The free Cloudflare tunnel gets a new address at
+   * every start, so all =IMAGE() links in the sheet are switched over with one find & replace.
+   */
+  async fixPhotoLinks() {
+    const host = photoHost();
+    if (!host || this.cfg.photoHost === host) return;
+    if (this.cfg.rows) {
+      await batchUpdate(this.cfg.spreadsheetId, [{
+        findReplace: {
+          find: 'https://[^/"]+/sheet-img/', replacement: `https://${host}/sheet-img/`, searchByRegex: true, includeFormulas: true, allSheets: true,
+        },
+      }]);
+      console.log(`[sheets] photo links in "${this.cfg.title}" now use ${host}`);
+    }
+    this.cfg.photoHost = host;
+    this.save();
   }
 
   replyText(m) {
@@ -949,4 +984,4 @@ class SheetSync extends EventEmitter {
   }
 }
 
-module.exports = { SheetSync, botEmail, sheetIdFrom, photoFile, DATA_ROOT, KEY_FILE, isConfigured: () => !!loadKey() };
+module.exports = { SheetSync, botEmail, sheetIdFrom, photoFile, photoHostChanged, DATA_ROOT, KEY_FILE, isConfigured: () => !!loadKey() };
