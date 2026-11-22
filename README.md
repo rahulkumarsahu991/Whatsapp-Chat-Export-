@@ -78,7 +78,13 @@ Press the **sheet button (📊)** next to Log out to copy all your chats into a 
 - If the app was off, it catches up on the missed messages when it starts again. Nothing is written twice.
 - **Reply to**: for a reply, who wrote the original message and what it said, for example `↩ Priya: Kal meeting kitne baje hai?`. The app's chat view shows replies the same way.
 - **Photo**: the real picture inside the cell. Stickers show too, and videos show their preview frame. Rows with a photo are taller.
-  - The pictures are served from this PC through the `start-mobile.bat` link, so they show only while the app runs that way. Google keeps a copy for a while.
+  - **One-time setup per sheet, the "Photo helper":** the 🖼️ box in the app's sheet panel has the code and the steps:
+    1. In the sheet open Extensions → Apps Script.
+    2. Paste the code and save.
+    3. Choose `setup` and press ▶ Run.
+    4. Allow access.
+  - The helper then puts each photo **inside its cell**, like the Excel export, every minute and newest first. A photo that is inside stays even when this PC is off.
+  - Until then, the cell holds a link to the photo on this PC. Google's own image fetcher can't open it because of ngrok's free-plan warning page, but the helper can.
   - Each picture has a long random address that can't be guessed.
   - Photos WhatsApp no longer has show their small preview.
 - Sheets made with an earlier version get the new columns automatically: rows stay where they are, and older rows get their photos and replies filled in.

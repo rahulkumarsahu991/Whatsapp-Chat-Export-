@@ -14,8 +14,6 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { spawn, execFileSync } = require('child_process');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 
 // App data lives in C:\Users\<you>\WhatsAppChatExporter (same folder as src/whatsapp.js uses).
 const ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
@@ -24,11 +22,6 @@ const SETTINGS = path.join(ROOT, 'mobile-settings.json');
 const POLICY = path.join(ROOT, 'ngrok-policy.yml');
 const NGROK_ZIP = 'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip';
 const PORT = 3000;
-// Google Sheet photos: Google's image fetcher gets ngrok's free-plan warning page, so the photos go
-// through a free Cloudflare "quick tunnel" to a photo-only server instead (no account needed).
-const CLOUDFLARED = path.join(ROOT, 'cloudflared', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
-const CLOUDFLARED_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
-const PHOTO_PORT = PORT + 11;
 
 const EMAIL = /^[^\s@'",]+@[^\s@'",]+\.[^\s@'",]+$/;
 const DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
@@ -147,124 +140,6 @@ function startTunnel(domain) {
   return child;
 }
 
-/** Downloads url (or the byte range [from, to]) into file; gives up if no data arrives for 60 s. */
-async function downloadPart(url, file, from, to) {
-  const ctrl = new AbortController();
-  let stall = setTimeout(() => ctrl.abort(), 60000);
-  const keepAlive = () => { clearTimeout(stall); stall = setTimeout(() => ctrl.abort(), 60000); };
-  try {
-    const headers = from !== undefined ? { Range: `bytes=${from}-${to}` } : {};
-    const res = await fetch(url, { signal: ctrl.signal, headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = Readable.fromWeb(res.body);
-    body.on('data', keepAlive);
-    await pipeline(body, fs.createWriteStream(file));
-  } finally {
-    clearTimeout(stall);
-  }
-}
-
-/**
- * Downloads a big file in 6 pieces at once (GitHub's downloads can be very slow per connection on
- * some networks), retrying a piece that stalls; falls back to one plain download.
- */
-async function downloadFile(url, file) {
-  const PIECES = 6;
-  const head = await fetch(url, { method: 'HEAD', redirect: 'follow' });
-  const size = Number(head.headers.get('content-length')) || 0;
-  if (!head.ok || !size || head.headers.get('accept-ranges') !== 'bytes') return downloadPart(url, file);
-  const finalUrl = head.url; // after GitHub's redirect
-  const step = Math.ceil(size / PIECES);
-  const parts = Array.from({ length: PIECES }, (_, i) => ({ from: i * step, to: Math.min(size, (i + 1) * step) - 1, file: `${file}.${i}` }));
-  await Promise.all(parts.map(async (p) => {
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        await downloadPart(finalUrl, p.file, p.from, p.to);
-        if (fs.statSync(p.file).size !== p.to - p.from + 1) throw new Error('piece incomplete');
-        return;
-      } catch (err) {
-        if (attempt >= 6) throw err;
-        await new Promise((r) => setTimeout(r, 5000 * attempt));
-      }
-    }
-  }));
-  const out = fs.createWriteStream(file);
-  for (const p of parts) {
-    await new Promise((resolve, reject) => {
-      const src = fs.createReadStream(p.file);
-      src.on('error', reject);
-      src.on('end', resolve);
-      src.pipe(out, { end: false });
-    });
-    fs.rmSync(p.file, { force: true });
-  }
-  await new Promise((resolve) => out.end(resolve));
-}
-
-/** Cloudflare's tunnel program (official build from Cloudflare's GitHub), downloaded once. */
-async function ensureCloudflared() {
-  if (fs.existsSync(CLOUDFLARED)) return true;
-  if (process.platform !== 'win32') return false;
-  console.log('  Downloading the Cloudflare tunnel for Google Sheet photos in the background (one time, about 55 MB)…');
-  fs.mkdirSync(path.dirname(CLOUDFLARED), { recursive: true });
-  const part = `${CLOUDFLARED}.part`;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      await downloadFile(CLOUDFLARED_URL, part);
-      if (fs.statSync(part).size < 10 * 1024 * 1024) throw new Error('the file is too small');
-      fs.renameSync(part, CLOUDFLARED);
-      console.log('  [photos] Cloudflare tunnel downloaded');
-      return true;
-    } catch (err) {
-      fs.rmSync(part, { force: true });
-      for (let i = 0; i < 6; i += 1) fs.rmSync(`${part}.${i}`, { force: true });
-      const why = err.name === 'AbortError' ? 'the download stalled' : err.message;
-      console.warn(`  [photos] Cloudflare download attempt ${attempt} failed (${why})${attempt < 5 ? ', trying again' : ''}`);
-      await new Promise((r) => setTimeout(r, 15000 * attempt));
-    }
-  }
-  console.warn('  [photos] could not download the Cloudflare tunnel. Sheet photos stay off until the next start.');
-  return false;
-}
-
-/** In the background: get the tunnel program, start it, and point the sheets' photos at it. */
-async function setupPhotoTunnel() {
-  if (!(await ensureCloudflared())) return;
-  startPhotoTunnel((host) => {
-    if (process.env.PHOTO_HOST === host) return;
-    process.env.PHOTO_HOST = host;
-    console.log(`  * Google Sheet photos go through https://${host}`);
-    require('./src/sheets').photoHostChanged(); // the sheets switch their photo links to this address
-  });
-}
-
-/** Runs the photo tunnel (restarting it if it stops); onHost(host) whenever its address is known/changes. */
-function startPhotoTunnel(onHost) {
-  let child = null;
-  let tries = 0;
-  let quitting = false;
-  const run = () => {
-    child = spawn(CLOUDFLARED, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${PHOTO_PORT}`], {
-      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    });
-    const read = (chunk) => {
-      const m = /https:\/\/([a-z0-9-]+\.trycloudflare\.com)/i.exec(String(chunk));
-      if (m) { tries = 0; onHost(m[1].toLowerCase()); }
-    };
-    child.stdout.on('data', read);
-    child.stderr.on('data', read);
-    child.on('exit', (code) => {
-      if (quitting) return;
-      tries += 1;
-      const wait = Math.min(300, 10 * tries);
-      console.warn(`  [photos] Cloudflare tunnel stopped (code ${code}); starting it again in ${wait}s`);
-      setTimeout(run, wait * 1000);
-    });
-  };
-  run();
-  process.on('exit', () => { quitting = true; try { child.kill(); } catch { /* already gone */ } });
-}
-
 (async () => {
   await ensureNgrok();
   let settings = null;
@@ -285,10 +160,7 @@ function startPhotoTunnel(onHost) {
   process.env.ALLOWED_EMAILS = settings.emails.join(',');
   process.env.OWNER_KEY = settings.ownerKey;
   startTunnel(settings.domain);
-  process.env.PHOTO_PORT = String(PHOTO_PORT);
   require('./server.js'); // the normal exporter, now also reachable at https://<domain>
-  // Sheet photos: never holds up the app; photo links switch over once the tunnel is up.
-  setupPhotoTunnel().catch((err) => console.warn(`  [photos] ${err.message}`));
 })().catch((err) => {
   console.error(`\n  Phone access could not start: ${err.message}\n`);
   process.exitCode = 1;

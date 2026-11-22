@@ -1191,6 +1191,16 @@ els.botEmail.addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(els.botEmail.textContent); toast('Email copied', 'success', 2000); } catch { /* clipboard blocked */ }
 });
 setInterval(() => { if (!els.syncPanel.hidden && syncStatus) renderSync(syncStatus); }, 30000); // refresh "x min ago"
+// "Photo helper" for the Google Sheet: copy its code for the sheet's Apps Script editor
+document.getElementById('copyHelperBtn').addEventListener('click', async () => {
+  try {
+    const code = await (await fetch('/photo-helper.gs', { headers: { 'ngrok-skip-browser-warning': '1' } })).text();
+    await navigator.clipboard.writeText(code);
+    toast('Helper code copied — paste it in Apps Script', 'success', 4000);
+  } catch {
+    window.open('/photo-helper.gs', '_blank'); // clipboard blocked: show the code to copy by hand
+  }
+});
 socket.on('session-ended', (r) => showEnded(r && r.why === 'app stopped'
   ? 'The app was stopped on the host computer, so your WhatsApp was unlinked and your data deleted.'
   : undefined));

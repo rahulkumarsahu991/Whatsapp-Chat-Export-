@@ -12,6 +12,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
+const sharp = require('sharp');
 const path = require('path');
 const { exec } = require('child_process');
 const compression = require('compression');
@@ -217,13 +218,20 @@ app.get('/owner', (req, res) => {
   res.redirect('/');
 });
 
-// Photos in the Google Sheet (=IMAGE(...) cells): Google fetches them from here through the link.
-// Names are long random hashes made by the sync, so they can't be guessed.
-app.get('/sheet-img/:sid/:name', (req, res) => {
+// Photos for the Google Sheet. The sheet's "Photo helper" script (public/photo-helper.gs) fetches them
+// through the link and puts them INSIDE the sheet's cells. Names are long random hashes made by the
+// sync, so they can't be guessed. ?s=small gives a smaller copy (for cells that refuse a big one).
+app.get('/sheet-img/:sid/:name', async (req, res) => {
   const file = photoFile(req.params.sid, req.params.name);
   if (!file) return res.status(404).end();
   res.set('Cache-Control', 'public, max-age=86400');
-  res.type('jpeg').sendFile(file);
+  if (req.query.s !== 'small') return res.type('jpeg').sendFile(file);
+  try {
+    const small = await sharp(file).resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer();
+    res.type('jpeg').send(small);
+  } catch {
+    res.status(500).end();
+  }
 });
 
 // The page asks for /css/app.css?v=… and /js/app.js?v=… (v changes whenever those files change), so
@@ -475,23 +483,6 @@ server.on('error', (err) => {
 const restored = Service.clearGuests().map(({ id, token }) => createSession(token, id, true, true));
 if (restored.length) console.log(`[guest] ${restored.length} syncing guest login(s) restored`);
 
-// A second, tiny server that ONLY hands out sheet photos (GET /sheet-img/<login>/<name>.jpg).
-// start-mobile.bat puts a Cloudflare tunnel in front of it, because Google's image fetcher gets
-// ngrok's free-plan warning page instead of the picture. Nothing else of the app is reachable here.
-const PHOTO_PORT = Number(process.env.PHOTO_PORT) || PORT + 11;
-const photoServer = http.createServer((req, res) => {
-  const m = /^\/sheet-img\/([^/?#]+)\/([^/?#]+)$/.exec(String(req.url || '').split('?')[0]);
-  const file = (req.method === 'GET' || req.method === 'HEAD') && m && photoFile(m[1], m[2]);
-  if (!file) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not found'); return; }
-  fs.stat(file, (err, st) => {
-    if (err) { res.writeHead(404); res.end(); return; }
-    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': st.size, 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
-    if (req.method === 'HEAD') { res.end(); return; }
-    fs.createReadStream(file).pipe(res);
-  });
-});
-photoServer.on('error', (err) => console.warn(`[photos] photo server not started (${err.code || err.message})`));
-photoServer.listen(PHOTO_PORT, '127.0.0.1');
 
 server.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;

@@ -44,8 +44,9 @@ const PREVIEW_PX = 480; // photo size kept for the sheet (longest side)
 const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
 const ENRICH_CHUNK = 24; // old rows updated per write while a sheet is being upgraded
 const cleanHost = (h) => String(h || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
-// Where Google fetches sheet photos from: the Cloudflare tunnel (PHOTO_HOST, set by start-mobile.bat).
-// Google's image fetcher gets ngrok's free-plan warning page, so the ngrok link is only a fallback.
+// Where the sheet's photo links point: the app's public link. Google's own image fetcher gets ngrok's
+// free-plan warning page, so the sheet's "Photo helper" script fetches them instead (it can skip that
+// page) and puts the pictures inside the cells. PHOTO_HOST can point the links somewhere else.
 const photoHost = () => cleanHost(process.env.PHOTO_HOST || process.env.PUBLIC_HOST);
 const PERSONAL_KEY = '_personal';
 const PERSONAL_TITLE = 'Personal Chats';

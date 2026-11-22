@@ -420,6 +420,20 @@
           <p id="syncStats" class="mt-2 text-xs text-slate-400"></p>
           <p id="syncError" hidden class="mt-2 text-xs text-rose-300"></p>
         </div>
+        <details id="photoHelp" class="group rounded-2xl border border-amber-400/30 bg-amber-400/[0.07] p-4 text-sm">
+          <summary class="flex cursor-pointer list-none items-center gap-2 font-semibold text-amber-100">
+            <span class="text-lg">🖼️</span> Photos inside the sheet: one-time setup
+            <span class="ml-auto text-xs text-amber-200/70 group-open:hidden">show</span>
+          </summary>
+          <p class="mt-2 text-xs leading-relaxed text-slate-300">A small helper in your sheet puts every photo <b>inside</b> its cell, like the Excel export. Once a photo is in, it stays there even when this PC is off.</p>
+          <ol class="mt-3 grid list-decimal gap-1.5 pl-5 text-[13px] leading-relaxed text-slate-200">
+            <li>In your Google Sheet: <b>Extensions → Apps Script</b>.</li>
+            <li>Delete what is in the editor, then paste the helper: <button id="copyHelperBtn" type="button" class="ml-1 rounded-lg bg-amber-400 px-2.5 py-1 text-xs font-bold text-ink active:scale-95">Copy helper code</button></li>
+            <li>Press <b>💾 Save</b>. At the top choose <b>setup</b>, then press <b>▶ Run</b>.</li>
+            <li>Allow access: <b>Review permissions</b> → your account → <b>Advanced</b> → <b>Go to … (unsafe)</b> → <b>Allow</b>. It's your own script.</li>
+          </ol>
+          <p class="mt-2 text-xs text-slate-400">Photos start appearing within a minute or two, newest first. Keep this PC on until they are in.</p>
+        </details>
         <button id="syncStopBtn" type="button" class="h-11 rounded-2xl border border-white/15 text-sm font-medium text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-500/10 hover:text-rose-200">Stop sync</button>
       </div>
     </div>
