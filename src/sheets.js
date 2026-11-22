@@ -42,6 +42,7 @@ const PHOTO_ROW_PX = 110; // rows with a photo are this tall, the others normal
 const TEXT_ROW_PX = 21;
 const PREVIEW_PX = 480; // photo size kept for the sheet (longest side)
 const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
+const ENRICH_CHUNK = 24; // old rows updated per write while a sheet is being upgraded
 const publicHost = () => String(process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
 const PERSONAL_KEY = '_personal';
 const PERSONAL_TITLE = 'Personal Chats';
@@ -309,6 +310,14 @@ function tabTitle(name, taken) {
   return title;
 }
 
+/** Index of the first value >= x in the sorted array. */
+function lowerBound(arr, x) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
 /** Number of values in the sorted array that are <= x (where a new row with sort value x goes). */
 function upperBound(arr, x) {
   let lo = 0;
@@ -360,7 +369,7 @@ class SheetSync extends EventEmitter {
     this.imageDir = opts.imageDir || '';
     this.imageSid = opts.imageSid || '';
     if (this.imageDir && this.imageSid) imageDirs.set(this.imageSid, this.imageDir);
-    this.photoQueue = new Semaphore(4);
+    this.photoQueue = new Semaphore(6);
     this.cfg = null;
     try { this.cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* not connected yet */ }
     this.written = new Map(); // chat id -> Set of fingerprints (loaded from cfg.written)
@@ -548,14 +557,7 @@ class SheetSync extends EventEmitter {
           this.needFull = null;
           await this.fullPass(kind);
         }
-        if (this.dirty.size) {
-          const ids = [...this.dirty];
-          this.dirty.clear();
-          const chats = await this.wa.listChatsForSync();
-          const byId = new Map(chats.map((c) => [c.id, c]));
-          for (const id of ids) if (byId.has(id)) await this.collect(byId.get(id), false);
-          await this.flush();
-        }
+        await this.processDirty();
       } while (this.enabled && (this.again || this.dirty.size || this.needFull));
       if (this.enabled) {
         this.phase = 'live';
@@ -865,20 +867,20 @@ class SheetSync extends EventEmitter {
     this.progress = { done: 0, total: chatIds.length };
     this.changed();
 
-    // rows of each tab by second: second -> [row index, …] in sheet order
+    // rows of each tab by second: second -> [sort value, …] in sheet order
     const bySecond = new Map();
     for (const [k, t] of Object.entries(this.cfg.tabs)) {
       const m = new Map();
-      (t.keys || []).forEach((key, i) => { const s = Math.floor(key); if (!m.has(s)) m.set(s, []); m.get(s).push(i + 1); });
+      (t.keys || []).forEach((key) => { const s = Math.floor(key); if (!m.has(s)) m.set(s, []); m.get(s).push(key); });
       bySecond.set(k, m);
     }
     const personalAt = new Map(); // second -> [{ chat, msgs }]
-    const targets = []; // { tab, row, m, chat }
+    const targets = []; // { tabKey, key (the row's sort value), m }
     const pick = (tabKey, chat, msgsAt) => {
       for (const [s, list] of msgsAt) {
-        const rowsAt = (bySecond.get(tabKey) || new Map()).get(s) || [];
-        if (rowsAt.length !== list.length) continue; // unclear: skip
-        list.forEach((m, j) => { if (m.reply || m.thumb || PHOTO_TYPES.has(m.type)) targets.push({ tabKey, row: rowsAt[j], m, chat }); });
+        const keysAt = (bySecond.get(tabKey) || new Map()).get(s) || [];
+        if (keysAt.length !== list.length) continue; // unclear: skip
+        list.forEach((m, j) => { if (m.reply || m.thumb || PHOTO_TYPES.has(m.type)) targets.push({ tabKey, key: keysAt[j], m }); });
       }
     };
     for (const chatId of chatIds) {
@@ -896,31 +898,54 @@ class SheetSync extends EventEmitter {
     }
     for (const [s, parts] of personalAt) if (parts.length === 1) pick(PERSONAL_KEY, parts[0].chat, new Map([[s, parts[0].list]]));
 
-    // write: Reply to, Type, Photo (3 neighbouring cells) + tall rows for photos, in chunks
+    // Write Reply to, Type, Photo (3 neighbouring cells) + tall rows for photos: newest first, a small
+    // chunk at a time (photos downloaded side by side), so the sheet fills in visibly as it goes —
+    // and new messages keep flowing in between chunks.
+    targets.sort((a, b) => b.m.ts - a.m.ts);
     this.progress = { done: 0, total: targets.length };
     this.changed();
-    let requests = [];
-    for (const tgt of targets) {
+    for (let i = 0; i < targets.length; i += ENRICH_CHUNK) {
       if (!this.enabled) return;
-      const tab = this.cfg.tabs[tgt.tabKey];
-      if (!tab) continue;
-      const head = tgt.tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
-      const photo = await this.photoCell(tgt.m);
-      requests.push({
-        updateCells: {
-          start: { sheetId: tab.sheetId, rowIndex: tgt.row, columnIndex: head.indexOf('Reply to') },
-          rows: [{ values: [cell(this.replyText(tgt.m)), cell(tgt.m.typeLabel), photo || cell('')] }],
-          fields: 'userEnteredValue',
-        },
+      const chunk = targets.slice(i, i + ENRICH_CHUNK);
+      const photos = await Promise.all(chunk.map((t) => this.photoCell(t.m).catch(() => null)));
+      const requests = [];
+      chunk.forEach((tgt, j) => {
+        const tab = this.cfg.tabs[tgt.tabKey];
+        if (!tab) return;
+        // where the row is now (new messages may have been added above it meanwhile)
+        const idx = lowerBound(tab.keys || [], tgt.key);
+        if ((tab.keys || [])[idx] !== tgt.key) return;
+        const row = idx + 1;
+        const head = tgt.tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+        requests.push({
+          updateCells: {
+            start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: head.indexOf('Reply to') },
+            rows: [{ values: [cell(this.replyText(tgt.m)), cell(tgt.m.typeLabel), photos[j] || cell('')] }],
+            fields: 'userEnteredValue',
+          },
+        });
+        if (photos[j]) requests.push(...heightRequests(tab.sheetId, row, [true]));
       });
-      if (photo) requests.push(...heightRequests(tab.sheetId, tgt.row, [true]));
-      this.progress.done += 1;
-      if (requests.length >= 400) { await batchUpdate(id, requests); requests = []; this.changed(); }
+      await batchUpdate(id, requests);
+      this.progress.done = i + chunk.length;
+      this.changed();
+      await this.processDirty();
+      this.phase = 'upgrade';
     }
-    await batchUpdate(id, requests);
     this.cfg.enrichPending = false;
     this.save();
     console.log(`[sheets] old rows updated with photos / replies: ${targets.length}`);
+  }
+
+  /** New messages that came in: write them now. */
+  async processDirty() {
+    if (!this.dirty.size) return;
+    const ids = [...this.dirty];
+    this.dirty.clear();
+    const chats = await this.wa.listChatsForSync();
+    const byId = new Map(chats.map((c) => [c.id, c]));
+    for (const id of ids) if (byId.has(id)) await this.collect(byId.get(id), false);
+    await this.flush();
   }
 }
 

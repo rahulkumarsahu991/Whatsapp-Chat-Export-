@@ -918,7 +918,7 @@ class WhatsAppService extends EventEmitter {
     return this.mediaQueue.run(async () => {
       const media = await Promise.race([
         msg.downloadMedia(),
-        new Promise((resolve) => setTimeout(() => resolve(null), 30000)),
+        new Promise((resolve) => setTimeout(() => resolve(null), 15000)), // gone from WhatsApp's servers: use the preview
       ]);
       return media && media.data ? Buffer.from(media.data, 'base64') : null;
     });
