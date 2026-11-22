@@ -60,6 +60,7 @@ const CACHE_TTL = 10 * 60 * 1000;
 const CHAT_LIST_TTL = 2 * 60 * 1000;
 const LOAD_TIMEOUT_MS = 3 * 60 * 1000; // whatsapp-web.js gives WhatsApp Web only 30 s to load by default
 const READY_WATCHDOG_MS = 5 * 60 * 1000; // linked, but no sync progress for this long → reconnect
+const HEALTH_CHECK_MS = Number(process.env.HEALTH_CHECK_MS) || 60 * 1000; // is the hidden WhatsApp page still alive?
 const MAX_STUCK_RESTARTS = 2;
 const MAX_START_RETRIES = 8;
 const TRANSIENT_ERROR = /net::ERR_|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|Navigation timeout|socket hang up|auth timeout|Waiting failed|exceeded|timed out|Target closed|Protocol error/i;
@@ -339,6 +340,7 @@ class WhatsAppService extends EventEmitter {
       this.stuckRestarts = 0;
       this.markSession(true);
       this.set('ready', 'Connected');
+      this.watchPage(client);
       // Build the chat list right away so it is waiting when the page asks for it.
       this.getChats().catch((err) => console.warn('[chats] warm-up failed:', err.message));
     });
@@ -450,7 +452,47 @@ class WhatsAppService extends EventEmitter {
     this.readyTimer = setTimeout(check, READY_WATCHDOG_MS);
   }
 
+  /**
+   * While connected, check every minute that the hidden WhatsApp page is still alive. Chrome can drop
+   * it (for example when the PC runs low on memory) without any event, which left the app showing
+   * "Connected" while nothing worked. A dead page is reopened from the saved login (no new QR).
+   */
+  watchPage(client) {
+    clearInterval(this.healthTimer);
+    const reopen = (why) => {
+      if (this.client !== client || this.stopping) return;
+      clearInterval(this.healthTimer);
+      console.warn(`[whatsapp] WhatsApp page stopped working (${why}) — reopening it, no new QR needed`);
+      this.set('starting', 'Reconnecting to WhatsApp…');
+      this.restart();
+    };
+    if (client.pupBrowser && !client.__watched) {
+      client.__watched = true;
+      client.pupBrowser.on('disconnected', () => reopen('the hidden browser closed'));
+      if (client.pupPage) client.pupPage.on('error', (err) => reopen(`page crashed: ${err && err.message}`));
+    }
+    let fails = 0;
+    this.healthTimer = setInterval(async () => {
+      if (this.client !== client || this.state !== 'ready' || this.stopping) return;
+      let answer;
+      try {
+        answer = await Promise.race([
+          client.pupPage.evaluate(() => typeof window.WWebJS !== 'undefined'),
+          new Promise((resolve) => setTimeout(() => resolve('busy'), 30000)),
+        ]);
+      } catch (err) {
+        answer = err.message;
+      }
+      if (answer === true) { fails = 0; return; }
+      fails += 1;
+      // busy loading a lot of history: allow a few minutes; broken (detached frame, closed target…): 2 checks
+      if (fails >= (answer === 'busy' ? 4 : 2)) reopen(answer === 'busy' ? 'no answer for minutes' : String(answer).slice(0, 120));
+    }, HEALTH_CHECK_MS);
+    this.healthTimer.unref();
+  }
+
   async destroy() {
+    clearInterval(this.healthTimer);
     clearTimeout(this.retryTimer);
     clearTimeout(this.readyTimer);
     clearTimeout(this.qrWait);
