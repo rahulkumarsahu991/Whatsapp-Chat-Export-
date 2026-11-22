@@ -128,35 +128,54 @@ function selectedPhoto() {
   if (!col || row < 2) return null;
   var cell = sheet.getRange(row, col);
   var value = cell.getValue();
+  var key = sheet.getName() + '!' + row;
+  // The picture is loaded here and handed to the viewer as data: Google's own image address can't be
+  // shown directly inside the viewer window (that gave a broken image).
+  var blob = null;
   var link = '';
-  var src = '';
   if (value && value.valueType === SpreadsheetApp.ValueType.IMAGE) {
     link = value.getAltTextDescription() || '';
-    try { src = value.getContentUrl() || ''; } catch (e) { src = ''; }
+    var stored = '';
+    try { stored = value.getContentUrl() || ''; } catch (e) { stored = ''; }
+    if (stored) { // the copy stored in the sheet (works even when the PC is off)
+      blob = fetchImage(stored, {}) || fetchImage(stored, { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() });
+    }
   } else {
     var m = PHOTO_LINK.exec(cell.getFormula());
     if (m) link = m[1];
   }
-  if (!src && !link) return { key: sheet.getName() + '!' + row, none: true };
-  if (!src) {
-    var res = UrlFetchApp.fetch(link, { headers: SKIP_WARNING, muteHttpExceptions: true });
-    if (res.getResponseCode() !== 200) return { key: sheet.getName() + '!' + row, none: true, offline: true };
-    src = 'data:image/jpeg;base64,' + Utilities.base64Encode(res.getBlob().getBytes());
-  }
+  if (!blob && link) blob = fetchImage(link, SKIP_WARNING); // the copy on the exporter's PC
+  if (!blob) return { key: key, none: !link && !(value && value.valueType === SpreadsheetApp.ValueType.IMAGE), offline: true };
+  var src = 'data:' + (blob.getContentType() || 'image/jpeg') + ';base64,' + Utilities.base64Encode(blob.getBytes());
   var head = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   var data = sheet.getRange(row, 1, 1, head.length).getDisplayValues()[0];
   var pick = function (name) { var i = head.indexOf(name); return i < 0 ? '' : data[i]; };
   return {
-    key: sheet.getName() + '!' + row,
+    key: key,
     src: src,
     caption: [pick('Sender'), pick('Date') + ' ' + pick('Time'), pick('Message')].filter(function (x) { return String(x).trim(); }).join(' · '),
   };
 }
 
+/** A picture from a web address, or null (not reachable / not a picture). */
+function fetchImage(url, headers) {
+  try {
+    var res = UrlFetchApp.fetch(url, { headers: headers, muteHttpExceptions: true, followRedirects: true });
+    var blob = res.getBlob();
+    if (res.getResponseCode() !== 200 || String(blob.getContentType() || '').indexOf('image/') !== 0) return null;
+    return blob;
+  } catch (e) {
+    return null;
+  }
+}
+
 function showBig() {
   var p = selectedPhoto();
   var ui = SpreadsheetApp.getUi();
-  if (!p || p.none) { ui.alert(p && p.offline ? 'The exporter PC is off — this photo is not in the sheet yet.' : 'Select a cell in a row that has a photo.'); return; }
+  if (!p || !p.src) {
+    ui.alert(p && !p.none ? 'This photo could not be loaded right now. Make sure the exporter PC is on, then try again.' : 'Select a cell in a row that has a photo.');
+    return;
+  }
   var html = '<div style="font:13px Arial;text-align:center"><img src="' + p.src + '" style="max-width:100%;max-height:78vh;border-radius:6px">'
     + '<p>' + String(p.caption || '').replace(/[<>&]/g, '') + '</p></div>';
   ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(900).setHeight(700), 'WhatsApp photo');
@@ -174,7 +193,7 @@ var VIEWER_HTML = [
   'function tick(){google.script.run.withSuccessHandler(function(p){',
   '  if(p&&p.key!==last){last=p.key;var img=document.getElementById("photo");',
   '    if(p.src){img.src=p.src;img.hidden=false;document.getElementById("hint").textContent="";}',
-  '    else{img.hidden=true;document.getElementById("hint").textContent=p.offline?"The exporter PC is off right now.":"No photo in this row.";}',
+  '    else{img.hidden=true;document.getElementById("hint").textContent=p.none?"No photo in this row.":"This photo could not be loaded right now (is the exporter PC on?).";}',
   '    document.getElementById("cap").textContent=p.caption||"";}',
   '  setTimeout(tick,800);}).withFailureHandler(function(){setTimeout(tick,2000);}).selectedPhoto();}',
   'tick();',
