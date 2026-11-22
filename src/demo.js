@@ -51,7 +51,10 @@ class DemoService extends EventEmitter {
   constructor(opts = {}) {
     super();
     const id = opts.id || 'exporter';
-    this.paths = { sync: path.join(DATA_ROOT, 'demo-sync', `${id}.json`) }; // Google Sheets progress (demo)
+    this.paths = { // Google Sheets progress and photo previews (demo)
+      sync: path.join(DATA_ROOT, 'demo-sync', `${id}.json`),
+      sheetImages: path.join(DATA_ROOT, 'demo-sync', `images-${id}`),
+    };
     this.state = 'idle';
     this.message = '';
     this.qr = null;
@@ -64,7 +67,7 @@ class DemoService extends EventEmitter {
 
   /** A few one-to-one chats, so the "Personal Chats" sheet tab has something to show. */
   buildDirect() {
-    const now = Math.floor(Date.now() / 1000);
+    const now = Number(process.env.DEMO_NOW) || Math.floor(Date.now() / 1000); // DEMO_NOW: fixed time for tests
     return PEOPLE.slice(0, 4).map((name, i) => {
       const id = `91990000000${i}@c.us`;
       const messages = Array.from({ length: 6 }, (_, k) => {
@@ -151,7 +154,7 @@ class DemoService extends EventEmitter {
   }
 
   buildGroups() {
-    const now = Math.floor(Date.now() / 1000);
+    const now = Number(process.env.DEMO_NOW) || Math.floor(Date.now() / 1000); // DEMO_NOW: fixed time for tests
     return GROUPS.map((g, gi) => {
       const rand = rng(g.name);
       const members = PEOPLE.slice(gi, gi + g.members).concat(PEOPLE).slice(0, g.members).map((name, i) => ({
@@ -212,6 +215,12 @@ class DemoService extends EventEmitter {
         }
       }
       messages.sort((a, b) => a.ts - b.ts);
+      // Some messages are replies to an earlier one (shown as "Reply to" in the sheet)
+      messages.forEach((m, k) => {
+        if (k < 3 || k % 9 !== 4 || m.type !== 'chat') return;
+        const q = messages[k - 2];
+        m.reply = { name: q.fromMe ? 'You' : q.name, text: q.text || q.typeLabel };
+      });
       const last = messages[messages.length - 1];
       return {
         info: {
@@ -275,7 +284,7 @@ class DemoService extends EventEmitter {
       archived: false,
       preview: g.last.text || g.last.typeLabel,
     }));
-    const now = Math.floor(Date.now() / 1000);
+    const now = Number(process.env.DEMO_NOW) || Math.floor(Date.now() / 1000); // DEMO_NOW: fixed time for tests
     const direct = this.direct.map((d) => {
       const last = d.messages[d.messages.length - 1];
       return {
@@ -323,6 +332,13 @@ class DemoService extends EventEmitter {
 <path d="M0 400 L180 240 L320 360 L440 280 L640 420 L640 480 L0 480Z" fill="rgba(0,0,0,.25)"/>
 <text x="40" y="80" font-family="Segoe UI,Arial" font-size="34" font-weight="700" fill="#fff">${label}</text>
 <text x="40" y="122" font-family="Segoe UI,Arial" font-size="22" fill="#fff">${m.date} ${m.time}</text></svg>`;
+  }
+
+  /** Demo "real photo" for the Google Sheet (a picture, not the small preview). */
+  async getPhotoBuffer(id) {
+    const m = this.findMessage(id);
+    if (!m || !['image', 'sticker'].includes(m.type)) return null;
+    return Buffer.from(this.demoSvg(m, m.type === 'sticker' ? 'Demo sticker' : 'Demo photo (full)'));
   }
 
   async getThumb(id) {

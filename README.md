@@ -73,10 +73,15 @@ Good to know:
 Press the **sheet button (📊)** next to Log out to copy all your chats into a Google Sheet. After that, new messages are added automatically every few seconds.
 - Every **group** gets its own tab.
 - All **personal chats** share one **Personal Chats** tab, with a "Chat" column.
-- Columns: Date · Time · Day · Sender · Phone · Message · Type.
+- Columns: Date · Time · Day · Sender · Phone · Message · **Reply to** · Type · **Photo**.
 - **Old messages:** choose how far back to copy: 7 days, 30 days, 3 months, 1 year, or everything available. Copying everything can take a long time for big accounts.
 - If the app was off, it catches up on the missed messages when it starts again. Nothing is written twice.
-- Photos and videos show as "Photo" / "Video" with their caption. The files themselves are not uploaded.
+- **Reply to**: for a reply, who wrote the original message and what it said, for example `↩ Priya: Kal meeting kitne baje hai?`. The app's chat view shows replies the same way.
+- **Photo**: the real picture inside the cell. Stickers show too, and videos show their preview frame. Rows with a photo are taller.
+  - The pictures are served from this PC through the `start-mobile.bat` link, so they show only while the app runs that way. Google keeps a copy for a while.
+  - Each picture has a long random address that can't be guessed.
+  - Photos WhatsApp no longer has show their small preview.
+- Sheets made with an earlier version get the new columns automatically: rows stay where they are, and older rows get their photos and replies filled in.
 - **Stop sync** keeps what is already in the sheet.
 
 **For people using the shared link:** while sync is on, their WhatsApp stays linked to this PC, even after a restart, so their sheet keeps updating. To stop, they press **Stop sync**, **Log out**, or remove the device in WhatsApp → Linked devices. Up to 3 guests can be logged in at a time, syncing or not.

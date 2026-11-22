@@ -15,6 +15,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
+const sharp = require('sharp');
+const { Semaphore } = require('./media');
 
 const DATA_ROOT = process.env.DATA_DIR || path.join(os.homedir(), 'WhatsAppChatExporter');
 const KEY_FILE = process.env.GOOGLE_KEY_FILE || path.join(DATA_ROOT, 'google-service-account.json');
@@ -32,8 +34,15 @@ const MAX_CELL = 45000; // Google's limit is 50,000 characters per cell
 // After a fresh login, WhatsApp delivers older history over several minutes: look for it again then.
 const GAP_CHECKS_MIN = String(process.env.SHEETS_GAP_CHECKS_MIN || '3,10,30,90').split(',').map(Number).filter((n) => n > 0);
 
-const GROUP_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type', 'Sort'];
+// Sheet layout (version 3). Version 2 sheets had no "Reply to" / "Photo" and are upgraded in place.
+const GROUP_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Reply to', 'Type', 'Photo', 'Sort'];
 const PERSONAL_HEAD = ['Chat', ...GROUP_HEAD];
+const V1_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type']; // first version (no gap filling)
+const PHOTO_ROW_PX = 110; // rows with a photo are this tall, the others normal
+const TEXT_ROW_PX = 21;
+const PREVIEW_PX = 480; // photo size kept for the sheet (longest side)
+const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
+const publicHost = () => String(process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
 const PERSONAL_KEY = '_personal';
 const PERSONAL_TITLE = 'Personal Chats';
 
@@ -177,16 +186,50 @@ async function batchUpdate(id, requests) {
   }
   await sleep(50);
   const book = dryLoad(id);
-  const value = (v) => (v.userEnteredValue.numberValue !== undefined ? v.userEnteredValue.numberValue : v.userEnteredValue.stringValue);
+  const value = (v) => {
+    const u = (v && v.userEnteredValue) || {};
+    return u.numberValue !== undefined ? u.numberValue : u.formulaValue !== undefined ? u.formulaValue : (u.stringValue ?? '');
+  };
+  const tabOf = (sheetId) => {
+    const tab = book.sheets.find((s) => s.sheetId === sheetId);
+    if (!tab) throw Object.assign(new Error(`No grid with id: ${sheetId}`), { status: 400 });
+    return tab;
+  };
   for (const r of requests) {
-    if (r.addSheet) book.sheets.push({ sheetId: r.addSheet.properties.sheetId, title: r.addSheet.properties.title, rows: [] });
+    if (r.addSheet) book.sheets.push({ sheetId: r.addSheet.properties.sheetId, title: r.addSheet.properties.title, rows: [], heights: {} });
     if (r.appendCells) {
-      const tab = book.sheets.find((s) => s.sheetId === r.appendCells.sheetId);
-      if (!tab) throw Object.assign(new Error(`No grid with id: ${r.appendCells.sheetId}`), { status: 400 });
+      const tab = tabOf(r.appendCells.sheetId);
       for (const row of r.appendCells.rows) tab.rows.push(row.values.map(value));
     }
+    if (r.insertDimension) {
+      const { sheetId, dimension, startIndex, endIndex } = r.insertDimension.range;
+      const tab = tabOf(sheetId);
+      const n = endIndex - startIndex;
+      if (dimension === 'ROWS') {
+        tab.rows.splice(startIndex, 0, ...Array.from({ length: n }, () => []));
+        // like Google Sheets: rows below move down together with their heights
+        const moved = {};
+        for (const [i, px] of Object.entries(tab.heights || {})) moved[+i >= startIndex ? +i + n : +i] = px;
+        tab.heights = moved;
+      }
+      else tab.rows.forEach((row) => { while (row.length < startIndex) row.push(''); row.splice(startIndex, 0, ...Array(n).fill('')); });
+    }
+    if (r.updateCells) {
+      const { sheetId, rowIndex, columnIndex } = r.updateCells.start;
+      const tab = tabOf(sheetId);
+      r.updateCells.rows.forEach((row, i) => {
+        const target = tab.rows[rowIndex + i] || (tab.rows[rowIndex + i] = []);
+        row.values.forEach((v, j) => { target[columnIndex + j] = value(v); });
+      });
+    }
+    if (r.updateDimensionProperties && r.updateDimensionProperties.range.dimension === 'ROWS') {
+      const { sheetId, startIndex, endIndex } = r.updateDimensionProperties.range;
+      const tab = tabOf(sheetId);
+      tab.heights = tab.heights || {};
+      for (let i = startIndex; i < endIndex; i += 1) tab.heights[i] = r.updateDimensionProperties.properties.pixelSize;
+    }
     if (r.sortRange) {
-      const tab = book.sheets.find((s) => s.sheetId === r.sortRange.range.sheetId);
+      const tab = tabOf(r.sortRange.range.sheetId);
       const col = r.sortRange.sortSpecs[0].dimensionIndex;
       tab.rows = [tab.rows[0], ...tab.rows.slice(1).sort((a, b) => a[col] - b[col])];
     }
@@ -194,24 +237,68 @@ async function batchUpdate(id, requests) {
   drySave(id, book);
 }
 
+/** Values of some ranges (e.g. one column of each tab), unformatted. */
+async function valuesBatchGet(id, ranges) {
+  if (!ranges.length) return [];
+  if (DRY_RUN) {
+    const book = dryLoad(id);
+    return ranges.map((range) => {
+      const m = /^'(.*)'!([A-Z]+)2:/.exec(range);
+      const tab = book.sheets.find((s) => s.title === m[1].replace(/''/g, "'"));
+      const col = [...m[2]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+      return tab ? tab.rows.slice(1).map((r) => r[col]) : [];
+    });
+  }
+  const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
+  const res = await google('GET', `${SHEETS_API}/${id}/values:batchGet?${qs}&majorDimension=COLUMNS&valueRenderOption=UNFORMATTED_VALUE`);
+  return (res.valueRanges || []).map((v) => ((v.values || [])[0] || []));
+}
+
 const cell = (v) => ({ userEnteredValue: { stringValue: String(v ?? '').slice(0, MAX_CELL) } });
 const numCell = (n) => ({ userEnteredValue: { numberValue: n } });
 const boldCell = (v) => ({ ...cell(v), userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.86, green: 0.97, blue: 0.9 } } });
+const colLetter = (i) => { let s = ''; for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
+const quoteTitle = (t) => `'${String(t).replace(/'/g, "''")}'`;
+const columnWidth = (sheetId, col, px) => ({
+  updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: col, endIndex: col + 1 }, properties: { pixelSize: px }, fields: 'pixelSize' },
+});
+const headerCell = (sheetId, col, text) => ({
+  updateCells: { start: { sheetId, rowIndex: 0, columnIndex: col }, rows: [{ values: [boldCell(text)] }], fields: 'userEnteredValue,userEnteredFormat(textFormat,backgroundColor)' },
+});
 
-/** Requests that create a new tab: bold frozen header, wide Message column, hidden Sort column. */
+/** Requests that create a new tab: bold frozen header, readable widths, hidden Sort column. */
 function newTabRequests(sheetId, title, head) {
-  const msgCol = head.indexOf('Message');
-  const sortCol = head.indexOf('Sort');
-  const columns = (start, properties, fields) => ({
-    updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: start, endIndex: start + 1 }, properties, fields },
-  });
-  return [
+  const col = (name) => head.indexOf(name);
+  const reqs = [
     // (2 rows: Google refuses to freeze every row of a sheet; rows are added as messages come in)
     { addSheet: { properties: { sheetId, title, gridProperties: { rowCount: 2, columnCount: head.length, frozenRowCount: 1 } } } },
     { appendCells: { sheetId, rows: [{ values: head.map(boldCell) }], fields: 'userEnteredValue,userEnteredFormat(textFormat,backgroundColor)' } },
-    columns(msgCol, { pixelSize: 420 }, 'pixelSize'),
-    columns(sortCol, { hiddenByUser: true }, 'hiddenByUser'),
+    columnWidth(sheetId, col('Message'), 420),
   ];
+  if (col('Reply to') >= 0) reqs.push(columnWidth(sheetId, col('Reply to'), 260));
+  if (col('Photo') >= 0) reqs.push(columnWidth(sheetId, col('Photo'), 150));
+  if (col('Sort') >= 0) {
+    reqs.push({ updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: col('Sort'), endIndex: col('Sort') + 1 }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } });
+  }
+  return reqs;
+}
+
+/** Row heights for rows [start, start + flags.length): tall where flags[i] (a photo), normal elsewhere. */
+function heightRequests(sheetId, start, flags) {
+  const reqs = [];
+  for (let i = 0; i < flags.length;) {
+    let j = i;
+    while (j < flags.length && flags[j] === flags[i]) j += 1;
+    reqs.push({
+      updateDimensionProperties: {
+        range: { sheetId, dimension: 'ROWS', startIndex: start + i, endIndex: start + j },
+        properties: { pixelSize: flags[i] ? PHOTO_ROW_PX : TEXT_ROW_PX },
+        fields: 'pixelSize',
+      },
+    });
+    i = j;
+  }
+  return reqs;
 }
 
 function tabTitle(name, taken) {
@@ -222,8 +309,37 @@ function tabTitle(name, taken) {
   return title;
 }
 
+/** Number of values in the sorted array that are <= x (where a new row with sort value x goes). */
+function upperBound(arr, x) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function mergeSorted(a, b) {
+  const out = new Array(a.length + b.length);
+  let i = 0; let j = 0; let k = 0;
+  while (i < a.length && j < b.length) out[k++] = a[i] <= b[j] ? a[i++] : b[j++];
+  while (i < a.length) out[k++] = a[i++];
+  while (j < b.length) out[k++] = b[j++];
+  return out;
+}
+
 /** Short, stable fingerprint of a message id (remembered so a message is never written twice). */
 const fingerprint = (id) => crypto.createHash('sha1').update(String(id)).digest('base64url').slice(0, 10);
+
+// ---------------------------------------------------------------------------
+// Photos shown in the sheet: =IMAGE("https://<link>/sheet-img/<login>/<name>.jpg"), served by this PC
+// ---------------------------------------------------------------------------
+const imageDirs = new Map(); // login id -> folder with that login's sheet photos
+
+/** File for GET /sheet-img/:sid/:name (only names this app made), or null. */
+function photoFile(sid, name) {
+  if (!/^(exporter|g[0-9a-f]{12})$/.test(sid) || !/^[0-9a-f]{32}\.jpg$/.test(name)) return null;
+  const dir = imageDirs.get(sid);
+  const file = dir && path.join(dir, name);
+  return file && fs.existsSync(file) ? file : null;
+}
 
 // ---------------------------------------------------------------------------
 // Sync of one WhatsApp login
@@ -232,13 +348,19 @@ const SINCE_DAYS = { 7: 7, 30: 30, 90: 90, 365: 365 };
 
 class SheetSync extends EventEmitter {
   /**
-   * @param {object} wa   the login's service: status(), listChatsForSync(), fetchForSync(id, sinceTs), 'chat-activity' events
+   * @param {object} wa   the login's service: status(), listChatsForSync(), fetchForSync(id, sinceTs),
+   *                      getThumb(id), getPhotoBuffer(id), 'chat-activity' events
    * @param {string} file where this login's sync settings and progress are saved
+   * @param {{ imageDir?: string, imageSid?: string }} [opts] where this login's sheet photos are kept
    */
-  constructor(wa, file) {
+  constructor(wa, file, opts = {}) {
     super();
     this.wa = wa;
     this.file = file;
+    this.imageDir = opts.imageDir || '';
+    this.imageSid = opts.imageSid || '';
+    if (this.imageDir && this.imageSid) imageDirs.set(this.imageSid, this.imageDir);
+    this.photoQueue = new Semaphore(4);
     this.cfg = null;
     try { this.cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* not connected yet */ }
     this.written = new Map(); // chat id -> Set of fingerprints (loaded from cfg.written)
@@ -264,8 +386,10 @@ class SheetSync extends EventEmitter {
 
   get enabled() { return !!(this.cfg && this.cfg.enabled); }
 
-  /** Old (first version) sheets have no Sort column: they only get new messages, no gap filling. */
-  get canFillGaps() { return !!(this.cfg && this.cfg.version >= 2); }
+  get version() { return (this.cfg && this.cfg.version) || 1; }
+
+  /** First-version sheets have no Sort column: they only get new messages, no gap filling. */
+  get canFillGaps() { return this.version >= 2; }
 
   status() {
     const c = this.cfg || {};
@@ -283,6 +407,7 @@ class SheetSync extends EventEmitter {
       lastWriteAt: c.lastWriteAt || 0,
       error: this.error,
       oldFormat: this.enabled && !this.canFillGaps,
+      photos: !!publicHost() && this.version >= 2,
     };
   }
 
@@ -357,8 +482,9 @@ class SheetSync extends EventEmitter {
       this.cfg = { ...this.cfg, enabled: true, title: meta.title };
     } else {
       this.cfg = {
-        version: 2, enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, account: (me && me.id) || '',
+        version: 3, enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, account: (me && me.id) || '',
         connectedAt: Date.now(), tabs: {}, cursors: {}, written: {}, rows: 0, lastWriteAt: 0,
+        imgSecret: crypto.randomBytes(16).toString('hex'),
       };
       this.written = new Map();
       this.titles = null;
@@ -389,6 +515,7 @@ class SheetSync extends EventEmitter {
     this.gapTimers.forEach(clearTimeout);
     this.wa.off('chat-activity', this.onActivity);
     this.wa.off('status', this.onStatus);
+    if (this.imageSid && imageDirs.get(this.imageSid) === this.imageDir) imageDirs.delete(this.imageSid);
     this.cfg = this.cfg && { ...this.cfg, enabled: false }; // stops a running pass (nothing is saved)
   }
 
@@ -414,6 +541,8 @@ class SheetSync extends EventEmitter {
         const st = this.wa.status();
         if (st.state !== 'ready') { this.phase = 'waiting'; return; } // resumes on "ready"
         if (this.cfg.account && st.me && st.me.id && st.me.id !== this.cfg.account) return; // other account
+        if (this.version === 2) await this.upgradeToV3();
+        if (this.cfg.enrichPending) await this.enrichOldRows();
         if (this.needFull) {
           const kind = this.needFull;
           this.needFull = null;
@@ -488,6 +617,59 @@ class SheetSync extends EventEmitter {
   }
 
   /**
+   * The Photo cell of a message: =IMAGE(link to a copy of the photo on this PC), or empty.
+   * Photos and stickers are downloaded in full; videos (and photos WhatsApp no longer has) use the preview.
+   */
+  async photoCell(m) {
+    const host = publicHost();
+    if (!host || !this.imageDir || (!m.thumb && !PHOTO_TYPES.has(m.type))) return null;
+    if (!this.cfg.imgSecret) { this.cfg.imgSecret = crypto.randomBytes(16).toString('hex'); this.save(); }
+    const name = crypto.createHmac('sha256', this.cfg.imgSecret).update(String(m.id)).digest('hex').slice(0, 32);
+    const file = path.join(this.imageDir, `${name}.jpg`);
+    if (!fs.existsSync(file)) {
+      const made = await this.photoQueue.run(async () => {
+        let buf = null;
+        if (PHOTO_TYPES.has(m.type)) { try { buf = await this.wa.getPhotoBuffer(m.id); } catch { buf = null; } }
+        if (!buf && m.thumb) { try { buf = ((await this.wa.getThumb(m.id)) || {}).buffer || null; } catch { buf = null; } }
+        if (!buf) return false;
+        try {
+          const jpg = await sharp(buf, { animated: false })
+            .rotate()
+            .resize({ width: PREVIEW_PX, height: PREVIEW_PX, fit: 'inside', withoutEnlargement: true })
+            .flatten({ background: '#ffffff' })
+            .jpeg({ quality: 80 })
+            .toBuffer();
+          fs.mkdirSync(this.imageDir, { recursive: true });
+          fs.writeFileSync(file, jpg);
+          return true;
+        } catch { return false; }
+      });
+      if (!made) return null;
+    }
+    return { userEnteredValue: { formulaValue: `=IMAGE("https://${host}/sheet-img/${this.imageSid}/${name}.jpg")` } };
+  }
+
+  replyText(m) {
+    return m.reply ? `↩ ${m.reply.name}: ${m.reply.text}` : '';
+  }
+
+  /** Row cells for a message in the current sheet layout, and whether it holds a photo. */
+  async rowFor(m, chat, seq) {
+    const personal = !chat.isGroup;
+    if (this.version < 3) {
+      const row = [cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), cell(m.text), cell(m.typeLabel)];
+      if (this.version === 2) row.push(numCell(m.ts + Math.min(seq, 999) / 1000));
+      return { values: personal ? [cell(chat.name), ...row] : row, photo: false };
+    }
+    const photo = await this.photoCell(m);
+    const row = [
+      cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), cell(m.text),
+      cell(this.replyText(m)), cell(m.typeLabel), photo || cell(''), numCell(m.ts + Math.min(seq, 999) / 1000),
+    ];
+    return { values: personal ? [cell(chat.name), ...row] : row, photo: !!photo };
+  }
+
+  /**
    * Queues the chat's messages that are not in the sheet yet.
    * fromStart: look at everything since the start date (gap check); otherwise only after the newest written one.
    */
@@ -503,58 +685,86 @@ class SheetSync extends EventEmitter {
       msgs = msgs.filter((m) => !cur || m.ts > cur.ts || (m.ts === cur.ts && !(cur.ids || []).includes(m.id)));
     }
     if (!msgs.length) return;
-    const personal = !chat.isGroup;
     let seq = 0;
     let lastTs = -1;
-    const rows = msgs.map((m) => {
-      seq = m.ts === lastTs ? seq + 1 : 0; // keeps WhatsApp's order for messages in the same second
-      lastTs = m.ts;
-      const row = [cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), cell(m.text), cell(m.typeLabel)];
-      if (this.canFillGaps) row.push(numCell(m.ts + Math.min(seq, 999) / 1000));
-      return personal ? [cell(chat.name), ...row] : row;
-    });
+    const seqs = msgs.map((m) => { seq = m.ts === lastTs ? seq + 1 : 0; lastTs = m.ts; return seq; }); // keeps WhatsApp's order within a second
+    const built = await Promise.all(msgs.map((m, i) => this.rowFor(m, chat, seqs[i])));
+    const rows = built.map((b, i) => ({ ...b, key: msgs[i].ts + Math.min(seqs[i], 999) / 1000 }));
     const maxTs = msgs[msgs.length - 1].ts;
-    const minTs = msgs[0].ts;
     this.pending.push({
-      key: personal ? PERSONAL_KEY : chat.id,
+      key: chat.isGroup ? chat.id : PERSONAL_KEY,
       chat,
       chatId: chat.id,
       rows,
       prints: msgs.map((m) => fingerprint(m.id)),
-      minTs,
+      minTs: msgs[0].ts,
       maxTs,
       lastIds: msgs.filter((m) => m.ts === maxTs).map((m) => m.id),
     });
   }
 
-  /** Writes all queued rows (creating tabs, re-sorting a tab when older messages were added), then saves. */
+  /** Writes all queued rows, then saves the progress. */
   async flush() {
     const pending = this.pending;
     if (!pending.length) return;
     const id = this.cfg.spreadsheetId;
     if (!this.titles) this.titles = new Set((await getMeta(id)).tabs.map((t) => t.title.toLowerCase()));
+    const v3 = this.version >= 3;
 
     const requests = [];
     const created = [];
-    const resort = new Map(); // sheetId -> sort column
-    const tabMax = {};
+    const byTab = new Map(); // tab key -> { tab, rows }
     for (const p of pending) {
       let tab = this.cfg.tabs[p.key];
       if (!tab) {
         const personal = p.key === PERSONAL_KEY;
-        const head = personal ? PERSONAL_HEAD : GROUP_HEAD;
-        tab = { sheetId: crypto.randomInt(1e6, 2e9), title: tabTitle(personal ? PERSONAL_TITLE : p.chat.name, this.titles), sortCol: head.indexOf('Sort'), maxTs: 0 };
+        const head = v3 ? (personal ? PERSONAL_HEAD : GROUP_HEAD) : personal ? ['Chat', ...V1_HEAD, ...(this.version === 2 ? ['Sort'] : [])] : [...V1_HEAD, ...(this.version === 2 ? ['Sort'] : [])];
+        tab = { sheetId: crypto.randomInt(1e6, 2e9), title: tabTitle(personal ? PERSONAL_TITLE : p.chat.name, this.titles), sortCol: head.indexOf('Sort'), keys: [] };
         requests.push(...newTabRequests(tab.sheetId, tab.title, head));
         this.cfg.tabs[p.key] = tab;
         created.push(p.key);
       }
-      requests.push({ appendCells: { sheetId: tab.sheetId, rows: p.rows.map((values) => ({ values })), fields: 'userEnteredValue' } });
-      const max = tabMax[p.key] !== undefined ? tabMax[p.key] : (tab.maxTs || 0);
-      if (this.canFillGaps && tab.sortCol >= 0 && p.minTs < max) resort.set(tab.sheetId, tab.sortCol); // older than what is there
-      tabMax[p.key] = Math.max(max, p.maxTs);
+      if (!byTab.has(p.key)) byTab.set(p.key, { tab, rows: [] });
+      byTab.get(p.key).rows.push(...p.rows);
     }
-    for (const [sheetId, sortCol] of resort) {
-      requests.push({ sortRange: { range: { sheetId, startRowIndex: 1 }, sortSpecs: [{ dimensionIndex: sortCol, sortOrder: 'ASCENDING' }] } });
+
+    const newKeys = new Map();
+    for (const [k, { tab, rows }] of byTab) {
+      if (!v3) { // older layouts: add at the end (version 2 re-sorts below)
+        requests.push({ appendCells: { sheetId: tab.sheetId, rows: rows.map((r) => ({ values: r.values })), fields: 'userEnteredValue' } });
+        continue;
+      }
+      // Each new row goes straight to its place in time order: older ones are inserted, newer appended.
+      const keys = tab.keys || [];
+      rows.sort((a, b) => a.key - b.key);
+      const blocks = [];
+      for (const r of rows) {
+        const pos = upperBound(keys, r.key);
+        const last = blocks[blocks.length - 1];
+        if (last && last.pos === pos) last.rows.push(r); else blocks.push({ pos, rows: [r] });
+      }
+      let added = 0;
+      for (const b of blocks) {
+        const start = 1 + b.pos + added; // row 0 is the header
+        const data = b.rows.map((r) => ({ values: r.values }));
+        if (b.pos >= keys.length) {
+          requests.push({ appendCells: { sheetId: tab.sheetId, rows: data, fields: 'userEnteredValue' } });
+        } else {
+          requests.push({ insertDimension: { range: { sheetId: tab.sheetId, dimension: 'ROWS', startIndex: start, endIndex: start + data.length }, inheritFromBefore: false } });
+          requests.push({ updateCells: { start: { sheetId: tab.sheetId, rowIndex: start, columnIndex: 0 }, rows: data, fields: 'userEnteredValue' } });
+        }
+        requests.push(...heightRequests(tab.sheetId, start, b.rows.map((r) => r.photo)));
+        added += b.rows.length;
+      }
+      newKeys.set(k, mergeSorted(keys, rows.map((r) => r.key)));
+    }
+    if (this.version === 2) {
+      for (const p of pending) {
+        const tab = this.cfg.tabs[p.key];
+        if (tab.sortCol >= 0 && p.minTs < (tab.maxTs || 0)) {
+          requests.push({ sortRange: { range: { sheetId: tab.sheetId, startRowIndex: 1 }, sortSpecs: [{ dimensionIndex: tab.sortCol, sortOrder: 'ASCENDING' }] } });
+        }
+      }
     }
 
     try {
@@ -562,22 +772,11 @@ class SheetSync extends EventEmitter {
     } catch (err) {
       for (const k of created) delete this.cfg.tabs[k];
       this.titles = null;
-      // A tab we made was deleted in the sheet: forget it so the next pass creates it again.
-      if (err.status === 400 && /grid|sheet ?id/i.test(err.message)) {
-        const live = new Set((await getMeta(id)).tabs.map((t) => t.sheetId));
-        for (const [k, t] of Object.entries(this.cfg.tabs)) {
-          if (live.has(t.sheetId)) continue;
-          delete this.cfg.tabs[k];
-          // its chats start over, so the re-created tab gets all their messages again
-          const chatIds = k === PERSONAL_KEY ? Object.keys(this.cfg.cursors).filter((c) => !c.endsWith('@g.us')) : [k];
-          for (const c of chatIds) { delete this.cfg.cursors[c]; this.written.delete(c); }
-        }
-        this.save();
-      }
+      if (err.status === 400 && /grid|sheet ?id/i.test(err.message)) await this.forgetDeletedTabs();
       throw err;
     }
 
-    const rows = this.pendingRows();
+    for (const [k, keys] of newKeys) if (this.cfg.tabs[k]) this.cfg.tabs[k].keys = keys;
     for (const p of pending) {
       const set = this.written.get(p.chatId) || new Set();
       p.prints.forEach((f) => set.add(f));
@@ -585,14 +784,144 @@ class SheetSync extends EventEmitter {
       const cur = this.cfg.cursors[p.chatId];
       if (!cur || p.maxTs > cur.ts) this.cfg.cursors[p.chatId] = { ts: p.maxTs, ids: p.lastIds };
       else if (p.maxTs === cur.ts) cur.ids = [...new Set([...(cur.ids || []), ...p.lastIds])].slice(-200);
+      const tab = this.cfg.tabs[p.key];
+      if (tab) tab.maxTs = Math.max(tab.maxTs || 0, p.maxTs);
     }
-    for (const [k, max] of Object.entries(tabMax)) if (this.cfg.tabs[k]) this.cfg.tabs[k].maxTs = max;
-    this.cfg.rows = (this.cfg.rows || 0) + rows;
+    this.cfg.rows = (this.cfg.rows || 0) + this.pendingRows();
     this.cfg.lastWriteAt = Date.now();
     this.pending = [];
     this.save();
     this.changed();
   }
+
+  /** Tabs someone deleted in the sheet: forget them; their chats start over in a new tab. */
+  async forgetDeletedTabs() {
+    const live = new Set((await getMeta(this.cfg.spreadsheetId)).tabs.map((t) => t.sheetId));
+    for (const [k, t] of Object.entries(this.cfg.tabs)) {
+      if (live.has(t.sheetId)) continue;
+      delete this.cfg.tabs[k];
+      const chatIds = k === PERSONAL_KEY ? Object.keys(this.cfg.cursors).filter((c) => !c.endsWith('@g.us')) : [k];
+      for (const c of chatIds) { delete this.cfg.cursors[c]; this.written.delete(c); }
+    }
+    this.save();
+  }
+
+  /**
+   * Version 2 → 3: adds the "Reply to" and "Photo" columns to every tab (rows stay where they are),
+   * reads each tab's Sort column to know where rows are, then fills old rows' photos and replies.
+   */
+  async upgradeToV3() {
+    const id = this.cfg.spreadsheetId;
+    this.phase = 'upgrade';
+    this.progress = { done: 0, total: 0 };
+    this.changed();
+    await this.forgetDeletedTabs();
+    const meta = await getMeta(id);
+    const titleOf = new Map(meta.tabs.map((t) => [t.sheetId, t.title]));
+    const entries = Object.entries(this.cfg.tabs);
+    const cols = await valuesBatchGet(id, entries.map(([, t]) => {
+      const c = colLetter(t.sortCol);
+      return `${quoteTitle(titleOf.get(t.sheetId))}!${c}2:${c}`;
+    }));
+    const requests = [];
+    entries.forEach(([k, t], i) => {
+      const head = k === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+      const msgCol = head.indexOf('Message');
+      const keys = (cols[i] || []).map(Number).filter((n) => Number.isFinite(n));
+      const sorted = keys.every((x, j) => j === 0 || keys[j - 1] <= x);
+      const sid = t.sheetId;
+      requests.push(
+        { insertDimension: { range: { sheetId: sid, dimension: 'COLUMNS', startIndex: msgCol + 1, endIndex: msgCol + 2 }, inheritFromBefore: true } },
+        { insertDimension: { range: { sheetId: sid, dimension: 'COLUMNS', startIndex: msgCol + 3, endIndex: msgCol + 4 }, inheritFromBefore: true } },
+        headerCell(sid, msgCol + 1, 'Reply to'),
+        headerCell(sid, msgCol + 3, 'Photo'),
+        columnWidth(sid, msgCol + 1, 260),
+        columnWidth(sid, msgCol + 3, 150),
+      );
+      t.sortCol = head.indexOf('Sort');
+      if (!sorted) {
+        requests.push({ sortRange: { range: { sheetId: sid, startRowIndex: 1 }, sortSpecs: [{ dimensionIndex: t.sortCol, sortOrder: 'ASCENDING' }] } });
+        keys.sort((a, b) => a - b);
+      }
+      t.keys = keys;
+    });
+    await batchUpdate(id, requests);
+    this.cfg.version = 3;
+    this.cfg.enrichPending = true;
+    if (!this.cfg.imgSecret) this.cfg.imgSecret = crypto.randomBytes(16).toString('hex');
+    this.save();
+    console.log(`[sheets] sheet upgraded: "Reply to" and "Photo" columns added to ${entries.length} tabs`);
+  }
+
+  /**
+   * Fills "Reply to" and "Photo" for rows written before those columns existed. A row is found by its
+   * time (Sort value); messages sent in the same second are matched in order, and skipped when unclear.
+   */
+  async enrichOldRows() {
+    const id = this.cfg.spreadsheetId;
+    const chatIds = Object.keys(this.cfg.cursors);
+    const chats = new Map((await this.wa.listChatsForSync()).map((c) => [c.id, c]));
+    this.phase = 'upgrade';
+    this.progress = { done: 0, total: chatIds.length };
+    this.changed();
+
+    // rows of each tab by second: second -> [row index, …] in sheet order
+    const bySecond = new Map();
+    for (const [k, t] of Object.entries(this.cfg.tabs)) {
+      const m = new Map();
+      (t.keys || []).forEach((key, i) => { const s = Math.floor(key); if (!m.has(s)) m.set(s, []); m.get(s).push(i + 1); });
+      bySecond.set(k, m);
+    }
+    const personalAt = new Map(); // second -> [{ chat, msgs }]
+    const targets = []; // { tab, row, m, chat }
+    const pick = (tabKey, chat, msgsAt) => {
+      for (const [s, list] of msgsAt) {
+        const rowsAt = (bySecond.get(tabKey) || new Map()).get(s) || [];
+        if (rowsAt.length !== list.length) continue; // unclear: skip
+        list.forEach((m, j) => { if (m.reply || m.thumb || PHOTO_TYPES.has(m.type)) targets.push({ tabKey, row: rowsAt[j], m, chat }); });
+      }
+    };
+    for (const chatId of chatIds) {
+      if (!this.enabled) return;
+      const chat = chats.get(chatId);
+      if (chat) {
+        const msgs = (await this.wa.fetchForSync(chatId, this.cfg.sinceTs)).filter((m) => this.isWritten(chatId, m.id));
+        const msgsAt = new Map();
+        for (const m of msgs) { if (!msgsAt.has(m.ts)) msgsAt.set(m.ts, []); msgsAt.get(m.ts).push(m); }
+        if (chat.isGroup) pick(chatId, chat, msgsAt);
+        else for (const [s, list] of msgsAt) { if (!personalAt.has(s)) personalAt.set(s, []); personalAt.get(s).push({ chat, list }); }
+      }
+      this.progress.done += 1;
+      this.changed();
+    }
+    for (const [s, parts] of personalAt) if (parts.length === 1) pick(PERSONAL_KEY, parts[0].chat, new Map([[s, parts[0].list]]));
+
+    // write: Reply to, Type, Photo (3 neighbouring cells) + tall rows for photos, in chunks
+    this.progress = { done: 0, total: targets.length };
+    this.changed();
+    let requests = [];
+    for (const tgt of targets) {
+      if (!this.enabled) return;
+      const tab = this.cfg.tabs[tgt.tabKey];
+      if (!tab) continue;
+      const head = tgt.tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+      const photo = await this.photoCell(tgt.m);
+      requests.push({
+        updateCells: {
+          start: { sheetId: tab.sheetId, rowIndex: tgt.row, columnIndex: head.indexOf('Reply to') },
+          rows: [{ values: [cell(this.replyText(tgt.m)), cell(tgt.m.typeLabel), photo || cell('')] }],
+          fields: 'userEnteredValue',
+        },
+      });
+      if (photo) requests.push(...heightRequests(tab.sheetId, tgt.row, [true]));
+      this.progress.done += 1;
+      if (requests.length >= 400) { await batchUpdate(id, requests); requests = []; this.changed(); }
+    }
+    await batchUpdate(id, requests);
+    this.cfg.enrichPending = false;
+    this.save();
+    console.log(`[sheets] old rows updated with photos / replies: ${targets.length}`);
+  }
 }
 
-module.exports = { SheetSync, botEmail, sheetIdFrom, DATA_ROOT, KEY_FILE, isConfigured: () => !!loadKey() };
+module.exports = { SheetSync, botEmail, sheetIdFrom, photoFile, DATA_ROOT, KEY_FILE, isConfigured: () => !!loadKey() };

@@ -628,7 +628,11 @@ function mediaHtml(m) {
 
 function bodyHtml(m) {
   if (m.type === 'revoked') return `<span class="italic text-slate-400">🚫 ${esc(m.text)}</span>`;
-  const fwd = m.forwarded ? '<span class="block text-[11px] italic opacity-60">↪ Forwarded</span>' : '';
+  let fwd = m.forwarded ? '<span class="block text-[11px] italic opacity-60">↪ Forwarded</span>' : '';
+  // a reply shows the message it answers on top, like WhatsApp
+  if (m.reply) {
+    fwd += `<span class="mb-1 block max-w-full rounded-lg border-l-4 border-wa/70 bg-black/25 px-2.5 py-1 text-[12.5px] leading-snug"><b class="block truncate text-wa">${esc(m.reply.name)}</b><span class="line-clamp-2 whitespace-normal opacity-80">${esc(m.reply.text)}</span></span>`;
+  }
   if (m.isMedia) {
     const caption = m.type === 'document' ? '' : esc(m.text);
     return `${fwd}${mediaHtml(m)}${caption}`;
@@ -884,8 +888,9 @@ function renderSync(st) {
 
   els.syncSheetLink.href = st.sheetUrl;
   els.syncSheetTitle.textContent = st.sheetTitle || 'Your Google Sheet';
-  const busy = st.phase === 'backfill' || st.phase === 'catchup' || st.phase === 'gaps';
+  const busy = st.phase === 'backfill' || st.phase === 'catchup' || st.phase === 'gaps' || st.phase === 'upgrade';
   const phases = {
+    upgrade: `Adding photos & replies to the sheet… ${fmtNum(st.done)} / ${fmtNum(st.total)}`,
     backfill: `Copying old messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     catchup: `Catching up on new messages… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
     gaps: `Checking for older messages WhatsApp loaded later… ${fmtNum(st.done)} / ${fmtNum(st.total)} chats`,
@@ -897,7 +902,8 @@ function renderSync(st) {
   els.syncPhase.textContent = phases[st.phase] || 'Starting…';
   els.syncBarBox.hidden = !busy;
   els.syncBar.style.width = `${st.total ? Math.round((st.done / st.total) * 100) : 5}%`;
-  els.syncStats.textContent = `${fmtNum(st.rows)} messages in the sheet${st.lastWriteAt ? ` · last update ${timeAgo(st.lastWriteAt)}` : ''}`;
+  els.syncStats.textContent = `${fmtNum(st.rows)} messages in the sheet${st.lastWriteAt ? ` · last update ${timeAgo(st.lastWriteAt)}` : ''}${
+    st.photos ? '' : ' · photos show in the sheet only when the app runs with start-mobile.bat'}`;
   const oldFormat = st.oldFormat
     ? 'This sheet was connected with the first version: it gets new messages, but older ones WhatsApp loaded late are not filled in. For a complete sheet: Stop sync, make a new sheet and connect that.'
     : '';

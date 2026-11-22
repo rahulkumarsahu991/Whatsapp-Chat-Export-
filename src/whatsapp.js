@@ -37,6 +37,7 @@ function sessionPaths(id) {
       // downloaded once and reused — even after a logout wipes the session (a big win on slow internet).
       browserCache: path.join(SESSION_ROOT, 'browser-cache'),
       sync: path.join(SESSION_ROOT, 'sheet-sync.json'), // Google Sheets sync settings + progress
+      sheetImages: path.join(SESSION_ROOT, 'sheet-images'), // photo previews shown in the sheet
     };
   }
   const root = path.join(GUEST_ROOT, id); // everything of one guest in one folder → one delete removes it all
@@ -49,6 +50,7 @@ function sessionPaths(id) {
     people: path.join(root, 'people-cache.json'),
     browserCache: path.join(root, 'browser-cache'),
     sync: path.join(root, 'sheet-sync.json'),
+    sheetImages: path.join(root, 'sheet-images'),
     keep: path.join(root, 'keep.json'), // present while this guest syncs to a sheet: login kept across restarts
   };
 }
@@ -735,6 +737,9 @@ class WhatsAppService extends EventEmitter {
         .filter((m) => !SYSTEM_TYPES.has(m.type) && m.timestamp >= sinceTs)
         .sort((a, b) => a.timestamp - b.timestamp);
       await this.resolvePeople(msgs);
+      // remembered so the sheet can get each photo's preview / full picture
+      for (const m of msgs) if (m.hasMedia) this.msgRefs.set(m.id._serialized, m);
+      while (this.msgRefs.size > MAX_MSG_REFS) this.msgRefs.delete(this.msgRefs.keys().next().value);
       return msgs.map((m) => this.serialize(m));
     });
   }
@@ -781,7 +786,11 @@ class WhatsAppService extends EventEmitter {
 
   async resolvePeople(msgs) {
     const notify = new Map();
+    const myId = this.me && this.me.id;
     for (const m of msgs) {
+      // whoever wrote a message this one replies to needs a name too
+      const quoted = m.hasQuotedMsg ? idStr(m._data && m._data.quotedParticipant) : '';
+      if (quoted && quoted !== myId && !notify.has(quoted)) notify.set(quoted, '');
       if (m.fromMe) continue;
       const id = m.author || m.from;
       if (!id) continue;
@@ -878,8 +887,41 @@ class WhatsAppService extends EventEmitter {
       phone: who.phone,
       forwarded: !!m.isForwarded,
       thumb: !!thumbOf(m),
+      reply: this.replyOf(m),
       ...describe(m),
     };
+  }
+
+  /** For a reply: who wrote the message it answers, and what it said. Otherwise null. */
+  replyOf(m) {
+    const q = m.hasQuotedMsg && m._data && m._data.quotedMsg;
+    if (!q) return null;
+    const qa = idStr(m._data.quotedParticipant);
+    const mine = qa && this.me && qa === this.me.id;
+    const person = qa && this.people.get(qa);
+    const name = mine ? 'You' : (person && person.name) || (qa.endsWith('@c.us') ? `+${qa.split('@')[0]}` : 'Someone');
+    const label = TYPE_LABELS[q.type] || q.type || 'Message';
+    const text = q.type === 'chat' ? q.body : [label, q.caption].filter(Boolean).join(': ');
+    return { name, text: String(text || label).slice(0, 300) };
+  }
+
+  /**
+   * The real photo of an image or sticker message (downloaded from WhatsApp), or null when it is
+   * not a photo or no longer available. Used for the Google Sheet's Photo column.
+   */
+  async getPhotoBuffer(id) {
+    let msg = this.msgRefs.get(id);
+    if (!msg) {
+      try { msg = await this.client.getMessageById(id); } catch { msg = null; }
+    }
+    if (!msg || !msg.hasMedia || !['image', 'sticker'].includes(msg.type)) return null;
+    return this.mediaQueue.run(async () => {
+      const media = await Promise.race([
+        msg.downloadMedia(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 30000)),
+      ]);
+      return media && media.data ? Buffer.from(media.data, 'base64') : null;
+    });
   }
 
   /** Small preview image for a photo/video message, or null. */

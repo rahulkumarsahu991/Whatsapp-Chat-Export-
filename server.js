@@ -20,7 +20,7 @@ const { Server } = require('socket.io');
 const { parseQuery } = require('./src/format');
 const { buildWorkbook, exportFileName } = require('./src/excel');
 const { prepareZip, streamZip } = require('./src/media');
-const { SheetSync } = require('./src/sheets');
+const { SheetSync, photoFile } = require('./src/sheets');
 
 const DEMO = process.argv.includes('--demo') || process.env.DEMO === '1';
 const OPEN_BROWSER = !process.argv.includes('--no-open');
@@ -113,7 +113,7 @@ function createSession(key, id, guest, persistent = false) {
   });
   wa.on('progress', (p) => io.to(s.room).emit('progress', p));
   // Google Sheets sync of this login (settings and progress are saved next to the login).
-  s.sync = new SheetSync(wa, wa.paths.sync);
+  s.sync = new SheetSync(wa, wa.paths.sync, { imageDir: wa.paths.sheetImages, imageSid: id });
   s.sync.on('status', (st) => io.to(s.room).emit('sync', st));
   sessions.set(key, s);
   return s;
@@ -215,6 +215,15 @@ app.get('/owner', (req, res) => {
   ]);
   console.log(`[owner] ${email} opened the app through the shared link`);
   res.redirect('/');
+});
+
+// Photos in the Google Sheet (=IMAGE(...) cells): Google fetches them from here through the link.
+// Names are long random hashes made by the sync, so they can't be guessed.
+app.get('/sheet-img/:sid/:name', (req, res) => {
+  const file = photoFile(req.params.sid, req.params.name);
+  if (!file) return res.status(404).end();
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.type('jpeg').sendFile(file);
 });
 
 // The page asks for /css/app.css?v=… and /js/app.js?v=… (v changes whenever those files change), so
