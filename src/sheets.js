@@ -248,19 +248,21 @@ async function batchUpdate(id, requests) {
 }
 
 /** Values of some ranges (e.g. one column of each tab), unformatted. */
-async function valuesBatchGet(id, ranges) {
+async function valuesBatchGet(id, ranges, major = 'COLUMNS') {
   if (!ranges.length) return [];
   if (DRY_RUN) {
     const book = dryLoad(id);
     return ranges.map((range) => {
-      const m = /^'(.*)'!([A-Z]+)2:/.exec(range);
+      const header = /^'(.*)'!1:1$/.exec(range);
+      const m = header || /^'(.*)'!([A-Z]+)2:/.exec(range);
       const tab = book.sheets.find((s) => s.title === m[1].replace(/''/g, "'"));
+      if (header) return tab ? (tab.rows[0] || []).map((v) => v ?? '') : [];
       const col = [...m[2]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
       return tab ? tab.rows.slice(1).map((r) => r[col]) : [];
     });
   }
   const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
-  const res = await google('GET', `${SHEETS_API}/${id}/values:batchGet?${qs}&majorDimension=COLUMNS&valueRenderOption=UNFORMATTED_VALUE`);
+  const res = await google('GET', `${SHEETS_API}/${id}/values:batchGet?${qs}&majorDimension=${major}&valueRenderOption=UNFORMATTED_VALUE`);
   return (res.valueRanges || []).map((v) => ((v.values || [])[0] || []));
 }
 
@@ -574,7 +576,10 @@ class SheetSync extends EventEmitter {
           this.cfg.enrichPending = 'hd'; // redo the sheet's photos in HD (newest first)
           this.save();
         }
-        if (this.cfg.enrichPending) await this.enrichOldRows(this.cfg.enrichPending === 'hd');
+        if (this.cfg.enrichPending) {
+          const ep = this.cfg.enrichPending;
+          await this.enrichOldRows(ep === 'hd' ? { mode: 'hd' } : typeof ep === 'object' ? ep : { mode: 'all' });
+        }
         if (this.needFull) {
           const kind = this.needFull;
           this.needFull = null;
@@ -765,6 +770,50 @@ class SheetSync extends EventEmitter {
     });
   }
 
+  /**
+   * Where each column of ours is in each tab right now, read from the tab's heading row (someone may
+   * have inserted, deleted or moved columns in the sheet). Cached for 2 minutes.
+   */
+  async loadHeads(force = false) {
+    if (!force && this.heads && Date.now() - this.headsAt < 2 * 60 * 1000) return this.heads;
+    const meta = await getMeta(this.cfg.spreadsheetId);
+    const titleOf = new Map(meta.tabs.map((t) => [t.sheetId, t.title]));
+    const tabs = Object.values(this.cfg.tabs).filter((t) => titleOf.has(t.sheetId));
+    const rows = await valuesBatchGet(this.cfg.spreadsheetId, tabs.map((t) => `${quoteTitle(titleOf.get(t.sheetId))}!1:1`), 'ROWS');
+    this.heads = new Map();
+    tabs.forEach((t, i) => {
+      const cols = {};
+      (rows[i] || []).forEach((name, c) => { if (name !== '' && cols[String(name)] === undefined) cols[String(name)] = c; });
+      this.heads.set(t.sheetId, cols);
+    });
+    this.headsAt = Date.now();
+    return this.heads;
+  }
+
+  /** Column of one of our headings in a tab (by name), falling back to our own layout. -1 if it was removed. */
+  colOf(tabKey, tab, name) {
+    const ours = (tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD).indexOf(name);
+    const cols = this.heads && this.heads.get(tab.sheetId);
+    if (!cols || !Object.keys(cols).length) return ours;
+    return cols[name] === undefined ? -1 : cols[name];
+  }
+
+  /** A full row in our layout → the same values placed under the tab's actual headings. */
+  align(tabKey, tab, values) {
+    const ours = tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+    const out = [];
+    ours.forEach((name, i) => { const c = this.colOf(tabKey, tab, name); if (c >= 0) out[c] = values[i]; });
+    for (let c = 0; c < out.length; c += 1) if (!out[c]) out[c] = {}; // someone else's column: left empty
+    return out;
+  }
+
+  /** Request writing one cell of ours (by heading name) in an existing row; null if that column is gone. */
+  cellAt(tabKey, tab, row, name, value) {
+    const c = this.colOf(tabKey, tab, name);
+    if (c < 0) return null;
+    return { updateCells: { start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: c }, rows: [{ values: [value] }], fields: 'userEnteredValue' } };
+  }
+
   /** Writes all queued rows, then saves the progress. */
   async flush() {
     const pending = this.pending;
@@ -772,6 +821,7 @@ class SheetSync extends EventEmitter {
     const id = this.cfg.spreadsheetId;
     if (!this.titles) this.titles = new Set((await getMeta(id)).tabs.map((t) => t.title.toLowerCase()));
     const v3 = this.version >= 3;
+    if (v3) await this.loadHeads();
 
     const requests = [];
     const created = [];
@@ -808,7 +858,7 @@ class SheetSync extends EventEmitter {
       let added = 0;
       for (const b of blocks) {
         const start = 1 + b.pos + added; // row 0 is the header
-        const data = b.rows.map((r) => ({ values: r.values }));
+        const data = b.rows.map((r) => ({ values: this.align(k, tab, r.values) }));
         if (b.pos >= keys.length) {
           requests.push({ appendCells: { sheetId: tab.sheetId, rows: data, fields: 'userEnteredValue' } });
         } else {
@@ -834,6 +884,7 @@ class SheetSync extends EventEmitter {
     } catch (err) {
       for (const k of created) delete this.cfg.tabs[k];
       this.titles = null;
+      this.heads = null; // read the headings again next time
       if (err.status === 400 && /grid|sheet ?id/i.test(err.message)) await this.forgetDeletedTabs();
       throw err;
     }
@@ -916,13 +967,22 @@ class SheetSync extends EventEmitter {
   }
 
   /**
-   * Fills "Reply to" and "Photo" for rows written before those columns existed. A row is found by its
-   * time (Sort value); messages sent in the same second are matched in order, and skipped when unclear.
+   * Rewrites columns of rows that are already in the sheet. A row is found by its time (Sort value);
+   * messages sent in the same second are matched in order, and skipped when unclear.
+   *   mode 'all'    — Reply to, Type, Photo for rows with a reply or a photo (after the v3 upgrade)
+   *   mode 'hd'     — Photo only, for photos/stickers that now have an HD picture
+   *   mode 'repair' — Reply to, Type, Photo and Sort for EVERY row of one tab (`tab`), e.g. after
+   *                   someone inserted a column and rows were written into the wrong columns
+   * Columns are found by their heading, so inserted or moved columns don't matter.
    */
-  async enrichOldRows(hdOnly = false) {
+  async enrichOldRows({ mode = 'all', tab: onlyTab = null } = {}) {
     const id = this.cfg.spreadsheetId;
-    const chatIds = Object.keys(this.cfg.cursors);
+    const hdOnly = mode === 'hd';
+    const repair = mode === 'repair';
+    let chatIds = Object.keys(this.cfg.cursors);
+    if (onlyTab) chatIds = chatIds.filter((c) => (onlyTab === PERSONAL_KEY ? !c.endsWith('@g.us') : c === onlyTab));
     const chats = new Map((await this.wa.listChatsForSync()).map((c) => [c.id, c]));
+    await this.loadHeads(true);
     this.phase = 'upgrade';
     this.progress = { done: 0, total: chatIds.length };
     this.changed();
@@ -936,12 +996,13 @@ class SheetSync extends EventEmitter {
     }
     const personalAt = new Map(); // second -> [{ chat, msgs }]
     const targets = []; // { tabKey, key (the row's sort value), m }
+    let unclear = 0;
     const pick = (tabKey, chat, msgsAt) => {
       for (const [s, list] of msgsAt) {
         const keysAt = (bySecond.get(tabKey) || new Map()).get(s) || [];
-        if (keysAt.length !== list.length) continue; // unclear: skip
+        if (keysAt.length !== list.length) { unclear += list.length; continue; } // unclear: skip
         list.forEach((m, j) => {
-          const wanted = hdOnly ? PHOTO_TYPES.has(m.type) : (m.reply || m.thumb || PHOTO_TYPES.has(m.type));
+          const wanted = repair || (hdOnly ? PHOTO_TYPES.has(m.type) : (m.reply || m.thumb || PHOTO_TYPES.has(m.type)));
           if (wanted) targets.push({ tabKey, key: keysAt[j], m });
         });
       }
@@ -959,20 +1020,24 @@ class SheetSync extends EventEmitter {
       this.progress.done += 1;
       this.changed();
     }
-    for (const [s, parts] of personalAt) if (parts.length === 1) pick(PERSONAL_KEY, parts[0].chat, new Map([[s, parts[0].list]]));
+    for (const [s, parts] of personalAt) {
+      if (parts.length === 1) pick(PERSONAL_KEY, parts[0].chat, new Map([[s, parts[0].list]]));
+      else unclear += parts.reduce((n, p) => n + p.list.length, 0);
+    }
 
-    // Write Reply to, Type, Photo (3 neighbouring cells) + tall rows for photos: newest first, a small
-    // chunk at a time (photos downloaded side by side), so the sheet fills in visibly as it goes —
-    // and new messages keep flowing in between chunks.
+    // Write newest first, a chunk at a time (photos made side by side), so the sheet fills in visibly
+    // as it goes — and new messages keep flowing in between chunks.
     targets.sort((a, b) => b.m.ts - a.m.ts);
     this.progress = { done: 0, total: targets.length };
     this.changed();
-    for (let i = 0; i < targets.length; i += ENRICH_CHUNK) {
+    const chunkSize = repair ? 150 : ENRICH_CHUNK;
+    for (let i = 0; i < targets.length; i += chunkSize) {
       if (!this.enabled) return;
-      const chunk = targets.slice(i, i + ENRICH_CHUNK);
-      const made = await Promise.all(chunk.map((t) => this.photoFor(t.m).catch(() => null)));
-      const photos = made.map((p) => (p ? p.cell : null));
+      const chunk = targets.slice(i, i + chunkSize);
+      const made = await Promise.all(chunk.map((t) => (repair || hdOnly || t.m.thumb || PHOTO_TYPES.has(t.m.type)
+        ? this.photoFor(t.m).catch(() => null) : null)));
       const requests = [];
+      const add = (r) => { if (r) requests.push(r); };
       chunk.forEach((tgt, j) => {
         const tab = this.cfg.tabs[tgt.tabKey];
         if (!tab) return;
@@ -980,23 +1045,17 @@ class SheetSync extends EventEmitter {
         const idx = lowerBound(tab.keys || [], tgt.key);
         if ((tab.keys || [])[idx] !== tgt.key) return;
         const row = idx + 1;
-        const head = tgt.tabKey === PERSONAL_KEY ? PERSONAL_HEAD : GROUP_HEAD;
+        const photo = made[j] ? made[j].cell : null;
         if (hdOnly) {
           // only where an HD photo was made; otherwise the picture already in the sheet stays
-          if (!made[j] || !made[j].hd) return;
-          requests.push({
-            updateCells: { start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: head.indexOf('Photo') }, rows: [{ values: [made[j].cell] }], fields: 'userEnteredValue' },
-          });
+          if (made[j] && made[j].hd) add(this.cellAt(tgt.tabKey, tab, row, 'Photo', photo));
           return;
         }
-        requests.push({
-          updateCells: {
-            start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: head.indexOf('Reply to') },
-            rows: [{ values: [cell(this.replyText(tgt.m)), cell(tgt.m.typeLabel), photos[j] || cell('')] }],
-            fields: 'userEnteredValue',
-          },
-        });
-        if (photos[j]) requests.push(...heightRequests(tab.sheetId, row, [true]));
+        add(this.cellAt(tgt.tabKey, tab, row, 'Reply to', cell(this.replyText(tgt.m))));
+        add(this.cellAt(tgt.tabKey, tab, row, 'Type', cell(tgt.m.typeLabel)));
+        add(this.cellAt(tgt.tabKey, tab, row, 'Photo', photo || cell('')));
+        if (repair) add(this.cellAt(tgt.tabKey, tab, row, 'Sort', numCell(tgt.key)));
+        if (photo || repair) requests.push(...heightRequests(tab.sheetId, row, [!!photo]));
       });
       await batchUpdate(id, requests);
       this.progress.done = i + chunk.length;
@@ -1007,7 +1066,8 @@ class SheetSync extends EventEmitter {
     this.cfg.enrichPending = false;
     if (hdOnly) this.cfg.photoVersion = PHOTO_VERSION;
     this.save();
-    console.log(`[sheets] old rows updated with ${hdOnly ? 'HD photos' : 'photos / replies'}: ${targets.length}`);
+    const what = { all: 'photos / replies', hd: 'HD photos', repair: 'repaired columns' }[mode];
+    console.log(`[sheets] rows updated (${what}): ${targets.length}${unclear ? `, ${unclear} unclear rows skipped` : ''}`);
   }
 
   /** New messages that came in: write them now. */
