@@ -909,6 +909,16 @@ function renderSync(st) {
     : '';
   els.syncError.hidden = !st.error && !oldFormat;
   els.syncError.textContent = st.error || oldFormat;
+  // Photo helper fast mode
+  const h = st.helper || {};
+  const helperState = document.getElementById('helperState');
+  if (helperState) {
+    helperState.textContent = !h.fast ? 'Fast mode is off.'
+      : h.error ? `⚠️ ${h.error}`
+        : h.running ? `⚡ Putting photos in…${h.left !== null ? ` ${fmtNum(h.left)} left` : ''}`
+          : h.left === 0 ? '✅ Fast mode on — all photos are in.' : '✅ Fast mode on.';
+    helperState.className = `mt-2 text-xs ${h.error ? 'text-rose-300' : 'text-slate-300'}`;
+  }
 }
 
 async function openSyncPanel() {
@@ -1192,13 +1202,32 @@ els.botEmail.addEventListener('click', async () => {
 });
 setInterval(() => { if (!els.syncPanel.hidden && syncStatus) renderSync(syncStatus); }, 30000); // refresh "x min ago"
 // "Photo helper" for the Google Sheet: copy its code for the sheet's Apps Script editor
+// (the code carries this sheet's own key, which lets the app start the helper in fast mode)
+let helperCodeText = '';
 document.getElementById('copyHelperBtn').addEventListener('click', async () => {
   try {
-    const code = await (await fetch('/photo-helper.gs', { headers: { 'ngrok-skip-browser-warning': '1' } })).text();
-    await navigator.clipboard.writeText(code);
+    helperCodeText = await (await api('/api/sync/helper-code')).text();
+    await navigator.clipboard.writeText(helperCodeText);
     toast('Helper code copied — paste it in Apps Script', 'success', 4000);
-  } catch {
-    window.open('/photo-helper.gs', '_blank'); // clipboard blocked: show the code to copy by hand
+  } catch (err) {
+    if (!helperCodeText) { toast(err.message, 'error'); return; }
+    const w = window.open('', '_blank'); // clipboard blocked: show the code to copy by hand
+    if (w) { w.document.title = 'Photo helper code'; const pre = w.document.createElement('pre'); pre.textContent = helperCodeText; w.document.body.append(pre); }
+  }
+});
+document.getElementById('helperSaveBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('helperSaveBtn');
+  const url = document.getElementById('helperUrl').value.trim();
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  try {
+    renderSync(await (await postJson('/api/sync/helper', { url })).json());
+    toast('Fast mode on — photos are being put in for all tabs', 'success', 5000);
+  } catch (err) {
+    toast(err.message, 'error', 9000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save';
   }
 });
 socket.on('session-ended', (r) => showEnded(r && r.why === 'app stopped'

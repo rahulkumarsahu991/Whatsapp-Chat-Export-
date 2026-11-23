@@ -344,6 +344,15 @@ api.post('/sync', route(async (req, res) => {
   res.json(st);
 }));
 
+// The sheet's Photo helper: its code (with this sheet's key) and its fast-mode Web app address.
+api.get('/sync/helper-code', route(async (req, res) => {
+  res.type('text/plain').send(req.s.sync.helperCode());
+}));
+
+api.post('/sync/helper', route(async (req, res) => {
+  res.json(await req.s.sync.setHelperUrl(req.body && req.body.url));
+}));
+
 api.post('/sync/stop', route(async (req, res) => {
   const s = req.s;
   s.sync.stop();

@@ -85,6 +85,11 @@ Press the **sheet button (📊)** next to Log out to copy all your chats into a 
     4. Allow access.
   - The helper then puts each photo **inside its cell**, like the Excel export, every minute and newest first. A photo that is inside stays even when this PC is off.
   - **Photo viewer:** the helper adds a 📷 WhatsApp menu to the sheet. Open *Photo viewer* once; after that, clicking any photo (or any cell of its row) shows it big in a side panel, and *See it full screen* enlarges it further. Google Sheets has no click-to-zoom of its own.
+  - **⚡ Fast mode (recommended):** on its own, Google lets the helper run only ~90 minutes a day, so a big sheet can stall for the rest of the day.
+    1. In Apps Script, Deploy → New deployment → Web app (Execute as: Me, Who has access: Anyone).
+    2. Paste the Web app URL in the app (📊 → Photos inside the sheet → Fast mode).
+    3. The app then starts the helper for all tabs at once, without that limit, and again whenever new photos arrive.
+  - **Headings decide the columns:** the sync finds its columns by their heading. Inserting or moving columns in a tab no longer shifts the data.
   - **Newer helper version:** paste the new code over the old one and press Save. There is no need to run setup again.
   - Until then, the cell holds a link to the photo on this PC. Google's own image fetcher can't open it because of ngrok's free-plan warning page, but the helper can.
   - Each picture has a long random address that can't be guessed.

@@ -407,7 +407,7 @@ class SheetSync extends EventEmitter {
     this.onStatus = (st) => this.statusChanged(st);
     wa.on('chat-activity', this.onActivity);
     wa.on('status', this.onStatus);
-    this.fullTimer = setInterval(() => this.requestPass('cursor'), FULL_PASS_MS);
+    this.fullTimer = setInterval(() => { this.requestPass('cursor'); this.pumpPhotos(); }, FULL_PASS_MS);
     this.fullTimer.unref();
   }
 
@@ -435,6 +435,12 @@ class SheetSync extends EventEmitter {
       error: this.error,
       oldFormat: this.enabled && !this.canFillGaps,
       upgrade: c.enrichPending === 'hd' ? 'hd' : c.enrichPending ? 'columns' : '',
+      helper: {
+        fast: !!c.helperUrl,
+        running: !!this.pumping,
+        left: this.helperLeft === undefined ? null : this.helperLeft,
+        error: this.helperError || '',
+      },
       photos: !!photoHost() && this.version >= 2,
     };
   }
@@ -470,6 +476,7 @@ class SheetSync extends EventEmitter {
     this.error = '';
     this.requestPass('cursor');
     this.scheduleGapChecks(); // a fresh login keeps loading older history for a while
+    this.pumpPhotos();
   }
 
   requestPass(kind) {
@@ -902,9 +909,11 @@ class SheetSync extends EventEmitter {
     }
     this.cfg.rows = (this.cfg.rows || 0) + this.pendingRows();
     this.cfg.lastWriteAt = Date.now();
+    const newPhotos = pending.some((p) => p.rows.some((r) => r.photo));
     this.pending = [];
     this.save();
     this.changed();
+    if (newPhotos) this.pumpPhotos(); // fast mode: put the new photos in right away
   }
 
   /** Tabs someone deleted in the sheet: forget them; their chats start over in a new tab. */
@@ -1060,6 +1069,7 @@ class SheetSync extends EventEmitter {
       await batchUpdate(id, requests);
       this.progress.done = i + chunk.length;
       this.changed();
+      this.pumpPhotos(); // fast mode: the helper starts on these right away
       await this.processDirty();
       this.phase = 'upgrade';
     }
@@ -1068,6 +1078,84 @@ class SheetSync extends EventEmitter {
     this.save();
     const what = { all: 'photos / replies', hd: 'HD photos', repair: 'repaired columns' }[mode];
     console.log(`[sheets] rows updated (${what}): ${targets.length}${unclear ? `, ${unclear} unclear rows skipped` : ''}`);
+  }
+
+  // -------------------------------------------------------------------------------------------------
+  // Photo helper in fast mode: the sheet's helper script deployed as a Web app. The app calls it for
+  // every tab at the same time; Web app runs don't count against Google's 90-minutes-a-day limit for
+  // scheduled scripts (which is what made the photos stop for the rest of the day).
+  // -------------------------------------------------------------------------------------------------
+
+  /** The helper code with this sheet's own key filled in (so only this app can start it). */
+  helperCode() {
+    if (!this.cfg) throw userError('Connect a sheet first.', 409);
+    if (!this.cfg.helperKey) { this.cfg.helperKey = crypto.randomBytes(18).toString('base64url'); this.save(); }
+    const template = fs.readFileSync(path.join(__dirname, '..', 'public', 'photo-helper.gs'), 'utf8');
+    return template.replace("var HELPER_KEY = '';", `var HELPER_KEY = '${this.cfg.helperKey}';`);
+  }
+
+  async callHelper(params, timeoutMs) {
+    const qs = new URLSearchParams({ key: this.cfg.helperKey || '', ...params });
+    const res = await fetch(`${this.cfg.helperUrl}?${qs}`, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); } catch {
+      throw new Error(/accounts\.google|ServiceLogin/i.test(text)
+        ? 'The helper asks for a Google sign-in: in Deploy set "Who has access" to Anyone.'
+        : `The helper did not answer properly (HTTP ${res.status}). Deploy it again as a Web app.`);
+    }
+    if (body.error) throw new Error(body.error === 'wrong key' ? 'The helper code is old: copy it again from the app, paste, Save and Deploy a new version.' : body.error);
+    return body;
+  }
+
+  /** Saves the helper's Web app address after checking it answers, then starts putting photos in. */
+  async setHelperUrl(url) {
+    const u = String(url || '').trim();
+    const testUrl = DRY_RUN && /^http:\/\/127\.0\.0\.1:\d+\/exec$/.test(u); // tests: a local stand-in
+    if (!testUrl && !/^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[A-Za-z0-9_-]{20,}\/exec$/.test(u)) {
+      throw userError('Paste the "Web app" URL from Apps Script (it starts with https://script.google.com/macros/s/ and ends with /exec).');
+    }
+    const old = this.cfg.helperUrl;
+    this.cfg.helperUrl = u;
+    try {
+      await this.callHelper({ ping: '1' }, 60000);
+    } catch (err) {
+      this.cfg.helperUrl = old;
+      throw userError(err.message);
+    }
+    this.save();
+    this.helperError = '';
+    console.log('[sheets] photo helper fast mode is on');
+    this.pumpPhotos();
+    this.changed();
+    return this.status();
+  }
+
+  /** Runs the helper for all tabs at once (each run up to ~5 minutes) until no photo link is left. */
+  async pumpPhotos() {
+    if (this.pumping || !this.cfg || !this.cfg.helperUrl || !this.enabled) return;
+    this.pumping = true;
+    this.changed();
+    try {
+      for (let round = 0; round < 50 && this.enabled && this.cfg.helperUrl; round += 1) {
+        const { tabs = [] } = await this.callHelper({ ping: '1' }, 60000);
+        const results = await Promise.all(tabs.map((tab) => this.callHelper({ tab }, 7 * 60 * 1000)
+          .catch((err) => ({ error: err.message, left: 0, done: 0 }))));
+        this.helperLeft = results.reduce((n, r) => n + (r.left || 0), 0);
+        const done = results.reduce((n, r) => n + (r.done || 0), 0);
+        const failed = results.find((r) => r.error);
+        this.helperError = failed ? failed.error : '';
+        this.changed();
+        if (done) console.log(`[sheets] photo helper: ${done} photos put in, ${this.helperLeft} left`);
+        if (!this.helperLeft || (!done && failed)) break; // finished, or stuck: try again later
+      }
+    } catch (err) {
+      this.helperError = err.message;
+      console.warn('[sheets] photo helper:', err.message);
+    } finally {
+      this.pumping = false;
+      this.changed();
+    }
   }
 
   /** New messages that came in: write them now. */

@@ -9,14 +9,21 @@
  *   1. In the function list at the top choose "setup", then press ▶ Run.
  *   2. Google asks for permission: Review permissions → choose your account → Advanced →
  *      "Go to … (unsafe)" → Allow. (It is your own script; Google shows this for every new script.)
- * After that it runs by itself every minute. Reload the sheet once to see the 📷 WhatsApp menu.
- * Updating to a newer version: paste the new code over the old one and Save (no need to run setup again).
+ *   3. FAST MODE (recommended): Deploy → New deployment → ⚙ Select type: Web app →
+ *      Execute as: Me, Who has access: Anyone → Deploy → copy the "Web app" URL and paste it in the
+ *      exporter app (📊 → Photos inside the sheet → Fast mode). Then the app puts the photos in for
+ *      all tabs at once, without Google's 90-minutes-a-day limit for scheduled scripts.
+ * After that it runs by itself. Reload the sheet once to see the 📷 WhatsApp menu.
+ * Updating to a newer version: paste the new code over the old one and Save. With fast mode, also
+ * Deploy → Manage deployments → ✏ Edit → Version: New version → Deploy (the URL stays the same).
  */
 
 var PHOTO_LINK = /^=IMAGE\("(https:\/\/[^"]+\/sheet-img\/[^"?]+)"\)$/i;
 var TIME_BUDGET_MS = 5 * 60 * 1000; // Apps Script stops a run after 6 minutes
 var BATCH = 40; // photos downloaded side by side, then written together
 var SKIP_WARNING = { 'ngrok-skip-browser-warning': '1' }; // gets the picture, not ngrok's "Visit Site" page
+// Filled in by the exporter app when you copy this code (it lets the app start the helper in fast mode).
+var HELPER_KEY = '';
 
 /** Run this once: starts the every-minute check and does the first round now. */
 function setup() {
@@ -41,65 +48,98 @@ function asImage(bytes, link) {
     .build();
 }
 
-/** Turns the =IMAGE("…/sheet-img/…") cells of every "Photo" column into photos stored in the cells. */
+/** Every minute (from setup): puts photos into all tabs, one run at a time. */
 function embedPhotos() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return; // the previous run is still busy
-  var started = Date.now();
-  var done = 0;
   try {
+    var done = 0;
+    var started = Date.now();
     var sheets = SpreadsheetApp.getActiveSpreadsheet().getSheets();
-    for (var s = 0; s < sheets.length; s++) {
-      var sheet = sheets[s];
-      var col = photoColumn(sheet);
-      if (!col) continue;
-      var tried = {}; // rows whose photo couldn't be fetched in this run
-      for (;;) {
-        if (Date.now() - started > TIME_BUDGET_MS) return; // the next run carries on
-        var lastRow = sheet.getLastRow();
-        var column = sheet.getRange(2, col, lastRow - 1, 1);
-        var formulas = column.getFormulas();
-        var todo = [];
-        for (var i = formulas.length - 1; i >= 0 && todo.length < BATCH; i--) { // newest (bottom) first
-          var m = PHOTO_LINK.exec(formulas[i][0]);
-          if (m && !tried[i + 2]) todo.push({ row: i + 2, formula: formulas[i][0], url: m[1] });
-        }
-        if (!todo.length) break;
-        var responses = UrlFetchApp.fetchAll(todo.map(function (t) {
-          return { url: t.url, headers: SKIP_WARNING, muteHttpExceptions: true };
-        }));
-        // rows may have moved while downloading: check once, then write everything without reading
-        var now = sheet.getRange(2, col, sheet.getLastRow() - 1, 1).getFormulas();
-        var writes = [];
-        for (var k = 0; k < todo.length; k++) {
-          var res = responses[k];
-          var headers = res.getHeaders();
-          var type = String(headers['Content-Type'] || headers['content-type'] || '');
-          if (res.getResponseCode() !== 200 || type.indexOf('image/') !== 0) { tried[todo[k].row] = true; continue; }
-          if (!now[todo[k].row - 2] || now[todo[k].row - 2][0] !== todo[k].formula) continue; // moved: next round
-          writes.push({ row: todo[k].row, bytes: res.getBlob().getBytes(), url: todo[k].url });
-        }
-        try {
-          writes.forEach(function (w) { sheet.getRange(w.row, col).setValue(asImage(w.bytes, w.url)); });
-          SpreadsheetApp.flush();
-          done += writes.length;
-        } catch (e) {
-          // one of them was too big for a cell: write them one by one, using a smaller copy if needed
-          writes.forEach(function (w) {
-            var cell = sheet.getRange(w.row, col);
-            if (!PHOTO_LINK.test(cell.getFormula())) return; // already a photo (or the row moved)
-            try { cell.setValue(asImage(w.bytes, w.url)); SpreadsheetApp.flush(); done++; return; } catch (e1) { /* too big */ }
-            try {
-              var small = UrlFetchApp.fetch(w.url + '?s=small', { headers: SKIP_WARNING, muteHttpExceptions: true });
-              if (small.getResponseCode() === 200) { cell.setValue(asImage(small.getBlob().getBytes(), w.url)); SpreadsheetApp.flush(); done++; }
-            } catch (e2) { tried[w.row] = true; }
-          });
-        }
-      }
+    for (var s = 0; s < sheets.length && Date.now() - started < TIME_BUDGET_MS; s++) {
+      done += embedInSheet(sheets[s], started + TIME_BUDGET_MS).done;
     }
+    if (done) console.log(done + ' photos put into the sheet');
   } finally {
     lock.releaseLock();
-    if (done) console.log(done + ' photos put into the sheet');
+  }
+}
+
+/**
+ * Fast mode: the exporter app calls this Web app (Deploy → Web app) for each tab at the same time.
+ * Web app runs are not limited to Google's 90 minutes a day for scheduled scripts.
+ */
+function doGet(e) {
+  var p = (e && e.parameter) || {};
+  if (!HELPER_KEY || p.key !== HELPER_KEY) return reply({ error: 'wrong key' });
+  if (p.ping) return reply({ ok: true, tabs: tabNames() });
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(p.tab || '');
+  if (!sheet) return reply({ error: 'no tab ' + p.tab });
+  var result = embedInSheet(sheet, Date.now() + TIME_BUDGET_MS);
+  return reply(result);
+}
+
+function reply(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function tabNames() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheets()
+    .filter(function (sh) { return photoColumn(sh) > 0; })
+    .map(function (sh) { return sh.getName(); });
+}
+
+/**
+ * Turns the =IMAGE("…/sheet-img/…") cells of one tab's "Photo" column into photos stored in the cells,
+ * newest first, until `deadline`. Returns { done, left, failed }.
+ */
+function embedInSheet(sheet, deadline) {
+  var col = photoColumn(sheet);
+  var done = 0;
+  var tried = {}; // rows whose photo couldn't be fetched in this run
+  if (!col) return { done: 0, left: 0, failed: 0 };
+  for (;;) {
+    var lastRow = sheet.getLastRow();
+    var formulas = sheet.getRange(2, col, lastRow - 1, 1).getFormulas();
+    var todo = [];
+    var left = 0;
+    for (var i = formulas.length - 1; i >= 0; i--) { // newest (bottom) first
+      var m = PHOTO_LINK.exec(formulas[i][0]);
+      if (!m) continue;
+      left++;
+      if (!tried[i + 2] && todo.length < BATCH) todo.push({ row: i + 2, formula: formulas[i][0], url: m[1] });
+    }
+    if (!todo.length || Date.now() > deadline) return { done: done, left: left, failed: Object.keys(tried).length };
+    var responses = UrlFetchApp.fetchAll(todo.map(function (t) {
+      return { url: t.url, headers: SKIP_WARNING, muteHttpExceptions: true };
+    }));
+    // rows may have moved while downloading: check once, then write everything without reading
+    var now = sheet.getRange(2, col, sheet.getLastRow() - 1, 1).getFormulas();
+    var writes = [];
+    for (var k = 0; k < todo.length; k++) {
+      var res = responses[k];
+      var headers = res.getHeaders();
+      var type = String(headers['Content-Type'] || headers['content-type'] || '');
+      if (res.getResponseCode() !== 200 || type.indexOf('image/') !== 0) { tried[todo[k].row] = true; continue; }
+      if (!now[todo[k].row - 2] || now[todo[k].row - 2][0] !== todo[k].formula) continue; // moved: next round
+      writes.push({ row: todo[k].row, bytes: res.getBlob().getBytes(), url: todo[k].url });
+    }
+    try {
+      writes.forEach(function (w) { sheet.getRange(w.row, col).setValue(asImage(w.bytes, w.url)); });
+      SpreadsheetApp.flush();
+      done += writes.length;
+    } catch (e) {
+      // one of them was too big for a cell: write them one by one, using a smaller copy if needed
+      writes.forEach(function (w) {
+        var cell = sheet.getRange(w.row, col);
+        if (!PHOTO_LINK.test(cell.getFormula())) return; // already a photo (or the row moved)
+        try { cell.setValue(asImage(w.bytes, w.url)); SpreadsheetApp.flush(); done++; return; } catch (e1) { /* too big */ }
+        try {
+          var small = UrlFetchApp.fetch(w.url + '?s=small', { headers: SKIP_WARNING, muteHttpExceptions: true });
+          if (small.getResponseCode() === 200) { cell.setValue(asImage(small.getBlob().getBytes(), w.url)); SpreadsheetApp.flush(); done++; }
+        } catch (e2) { tried[w.row] = true; }
+      });
+    }
   }
 }
 

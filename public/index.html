@@ -433,6 +433,20 @@
             <li>Allow access: <b>Review permissions</b> → your account → <b>Advanced</b> → <b>Go to … (unsafe)</b> → <b>Allow</b>. It's your own script.</li>
           </ol>
           <p class="mt-2 text-xs text-slate-400">Photos start appearing within a minute or two, newest first. Keep this PC on until they are in.</p>
+          <div class="mt-4 rounded-xl border border-wa/30 bg-wa/10 p-3">
+            <p class="font-semibold text-emerald-100">⚡ Fast mode (recommended)</p>
+            <p class="mt-1 text-xs leading-relaxed text-slate-300">Google lets the helper run on its own for only ~90 minutes a day. In fast mode this app starts it for all tabs at once, with no daily limit.</p>
+            <ol class="mt-2 grid list-decimal gap-1 pl-5 text-[13px] leading-relaxed text-slate-200">
+              <li>In Apps Script: <b>Deploy → New deployment</b>.</li>
+              <li>⚙ <b>Select type → Web app</b>. Execute as: <b>Me</b>. Who has access: <b>Anyone</b>. Press <b>Deploy</b> (allow access if asked).</li>
+              <li>Copy the <b>Web app URL</b> and paste it here:</li>
+            </ol>
+            <div class="mt-2 flex gap-2">
+              <input id="helperUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" class="h-10 min-w-0 flex-1 rounded-lg border border-white/15 bg-black/40 px-2.5 text-sm text-white placeholder:text-slate-600 focus:border-wa focus:outline-none">
+              <button id="helperSaveBtn" type="button" class="h-10 shrink-0 rounded-lg bg-wa px-3 text-sm font-bold text-ink active:scale-95 disabled:opacity-60">Save</button>
+            </div>
+            <p id="helperState" class="mt-2 text-xs text-slate-300"></p>
+          </div>
         </details>
         <button id="syncStopBtn" type="button" class="h-11 rounded-2xl border border-white/15 text-sm font-medium text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-500/10 hover:text-rose-200">Stop sync</button>
       </div>
