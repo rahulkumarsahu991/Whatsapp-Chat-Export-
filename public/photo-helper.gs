@@ -50,6 +50,10 @@ function asImage(bytes, link) {
 
 /** Every minute (from setup): puts photos into all tabs, one run at a time. */
 function embedPhotos() {
+  // In fast mode the app sends the photos itself (doPost); then this scheduled run has nothing to do
+  // (and doesn't use up Google's daily download quota).
+  var fastAt = Number(PropertiesService.getScriptProperties().getProperty('fastModeAt') || 0);
+  if (Date.now() - fastAt < 6 * 3600 * 1000) return;
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return; // the previous run is still busy
   try {
@@ -57,7 +61,9 @@ function embedPhotos() {
     var started = Date.now();
     var sheets = SpreadsheetApp.getActiveSpreadsheet().getSheets();
     for (var s = 0; s < sheets.length && Date.now() - started < TIME_BUDGET_MS; s++) {
-      done += embedInSheet(sheets[s], started + TIME_BUDGET_MS).done;
+      var r = embedInSheet(sheets[s], started + TIME_BUDGET_MS);
+      done += r.done;
+      if (r.unreachable) break; // PC off: try again next minute, without downloading for every tab
     }
     if (done) console.log(done + ' photos put into the sheet');
   } finally {
@@ -77,6 +83,51 @@ function doGet(e) {
   if (!sheet) return reply({ error: 'no tab ' + p.tab });
   var result = embedInSheet(sheet, Date.now() + TIME_BUDGET_MS);
   return reply(result);
+}
+
+/**
+ * Fast mode: the exporter app sends the photos (POST { key, tab, items: [{ link, data }] }, data =
+ * base64 JPEG) and this puts each one into the cell whose =IMAGE("link") it belongs to. No downloads
+ * here, so Google's daily download quota doesn't matter; no 90-minutes-a-day limit for Web app runs.
+ */
+function doPost(e) {
+  var body = {};
+  try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return reply({ error: 'bad request' }); }
+  if (!HELPER_KEY || body.key !== HELPER_KEY) return reply({ error: 'wrong key' });
+  PropertiesService.getScriptProperties().setProperty('fastModeAt', String(Date.now()));
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(body.tab || '');
+  if (!sheet) return reply({ error: 'no tab ' + body.tab });
+  var col = photoColumn(sheet);
+  if (!col) return reply({ error: 'no Photo column in ' + body.tab });
+  var formulas = sheet.getRange(2, col, sheet.getLastRow() - 1, 1).getFormulas();
+  var rowOf = {};
+  for (var i = 0; i < formulas.length; i++) {
+    var m = PHOTO_LINK.exec(formulas[i][0]);
+    if (m) rowOf[m[1]] = i + 2;
+  }
+  var done = 0;
+  var missing = 0;
+  var failed = [];
+  (body.items || []).forEach(function (it) {
+    var row = rowOf[it.link];
+    if (!row) { missing++; return; } // already a photo, or the row is gone
+    try {
+      sheet.getRange(row, col).setValue(SpreadsheetApp.newCellImage()
+        .setSourceUrl('data:image/jpeg;base64,' + it.data)
+        .setAltTextTitle('WhatsApp photo')
+        .setAltTextDescription(it.link)
+        .build());
+      done++;
+    } catch (err) {
+      failed.push(it.link);
+    }
+  });
+  try {
+    SpreadsheetApp.flush();
+  } catch (err) {
+    return reply({ error: 'could not save: ' + err.message, done: 0, failed: (body.items || []).map(function (it) { return it.link; }) });
+  }
+  return reply({ done: done, missing: missing, failed: failed });
 }
 
 function reply(o) {
@@ -113,6 +164,9 @@ function embedInSheet(sheet, deadline) {
     var responses = UrlFetchApp.fetchAll(todo.map(function (t) {
       return { url: t.url, headers: SKIP_WARNING, muteHttpExceptions: true };
     }));
+    // none came back (the exporter PC is off): stop now instead of using up the daily download quota
+    var anyOk = responses.some(function (r) { return r.getResponseCode() === 200; });
+    if (!anyOk) return { done: done, left: left, failed: Object.keys(tried).length, unreachable: true };
     // rows may have moved while downloading: check once, then write everything without reading
     var now = sheet.getRange(2, col, sheet.getLastRow() - 1, 1).getFormulas();
     var writes = [];

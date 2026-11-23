@@ -248,7 +248,7 @@ async function batchUpdate(id, requests) {
 }
 
 /** Values of some ranges (e.g. one column of each tab), unformatted. */
-async function valuesBatchGet(id, ranges, major = 'COLUMNS') {
+async function valuesBatchGet(id, ranges, major = 'COLUMNS', render = 'UNFORMATTED_VALUE') {
   if (!ranges.length) return [];
   if (DRY_RUN) {
     const book = dryLoad(id);
@@ -262,7 +262,7 @@ async function valuesBatchGet(id, ranges, major = 'COLUMNS') {
     });
   }
   const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
-  const res = await google('GET', `${SHEETS_API}/${id}/values:batchGet?${qs}&majorDimension=${major}&valueRenderOption=UNFORMATTED_VALUE`);
+  const res = await google('GET', `${SHEETS_API}/${id}/values:batchGet?${qs}&majorDimension=${major}&valueRenderOption=${render}`);
   return (res.valueRanges || []).map((v) => ((v.values || [])[0] || []));
 }
 
@@ -1131,23 +1131,109 @@ class SheetSync extends EventEmitter {
     return this.status();
   }
 
-  /** Runs the helper for all tabs at once (each run up to ~5 minutes) until no photo link is left. */
+  /** Sends one batch of photos to the helper (POST), which puts each into the cell of its link. */
+  async postHelper(body, timeoutMs) {
+    const res = await fetch(this.cfg.helperUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: this.cfg.helperKey || '', ...body }),
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await res.text();
+    let out;
+    try { out = JSON.parse(text); } catch {
+      const msg = (text.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ').match(/Exception:[^.]*\./) || [])[0];
+      throw new Error(msg ? `Google: ${msg}`
+        : 'The helper did not answer properly: in Apps Script paste the new code, Save, then Deploy → Manage deployments → ✏ → Version: New version → Deploy.');
+    }
+    if (out.error) throw new Error(out.error === 'wrong key' ? 'The helper code is old: copy it again from the app, paste, Save and deploy a new version.' : out.error);
+    return out;
+  }
+
+  /** Photo links still waiting in the sheet, per tab, newest first (read from the Photo columns). */
+  async pendingPhotoLinks() {
+    const heads = await this.loadHeads(true);
+    const meta = await getMeta(this.cfg.spreadsheetId);
+    const titleOf = new Map(meta.tabs.map((t) => [t.sheetId, t.title]));
+    const tabs = Object.entries(this.cfg.tabs)
+      .map(([k, t]) => ({ key: k, tab: t, title: titleOf.get(t.sheetId), col: (heads.get(t.sheetId) || {}).Photo }))
+      .filter((t) => t.title && t.col !== undefined);
+    const cols = await valuesBatchGet(this.cfg.spreadsheetId, tabs.map((t) => `${quoteTitle(t.title)}!${colLetter(t.col)}2:${colLetter(t.col)}`), 'COLUMNS', 'FORMULA');
+    const re = /^=IMAGE\("(https:\/\/[^"]+\/sheet-img\/([^/"]+)\/([0-9a-f]{32}\.jpg))"\)$/i;
+    return tabs.map((t, i) => {
+      const links = [];
+      for (const v of (cols[i] || [])) {
+        const m = re.exec(String(v || ''));
+        if (m) links.push({ link: m[1], file: photoFile(m[2], m[3]) });
+      }
+      return { title: t.title, links: links.reverse() }; // bottom of the tab = newest first
+    });
+  }
+
+  /**
+   * Fast mode: sends the waiting photos to the helper — about 25 at a time, several batches at once
+   * across the tabs — until none is left. The helper downloads nothing itself, so Google's daily
+   * download quota doesn't matter, and Web app runs have no 90-minutes-a-day limit.
+   */
   async pumpPhotos() {
-    if (this.pumping || !this.cfg || !this.cfg.helperUrl || !this.enabled) return;
+    if (this.pumping || !this.cfg || !this.cfg.helperUrl || !this.enabled || this.version < 3) return;
     this.pumping = true;
     this.changed();
     try {
-      for (let round = 0; round < 50 && this.enabled && this.cfg.helperUrl; round += 1) {
-        const { tabs = [] } = await this.callHelper({ ping: '1' }, 60000);
-        const results = await Promise.all(tabs.map((tab) => this.callHelper({ tab }, 7 * 60 * 1000)
-          .catch((err) => ({ error: err.message, left: 0, done: 0 }))));
-        this.helperLeft = results.reduce((n, r) => n + (r.left || 0), 0);
-        const done = results.reduce((n, r) => n + (r.done || 0), 0);
-        const failed = results.find((r) => r.error);
-        this.helperError = failed ? failed.error : '';
+      for (let round = 0; round < 500 && this.enabled && this.cfg.helperUrl; round += 1) {
+        const pending = await this.pendingPhotoLinks();
+        this.helperLeft = pending.reduce((n, t) => n + t.links.filter((l) => l.file).length, 0);
         this.changed();
-        if (done) console.log(`[sheets] photo helper: ${done} photos put in, ${this.helperLeft} left`);
-        if (!this.helperLeft || (!done && failed)) break; // finished, or stuck: try again later
+        if (!this.helperLeft) break;
+        // up to 2 batches per tab, up to 8 at the same time
+        const batches = [];
+        for (const t of pending) {
+          let made = 0;
+          let items = [];
+          let bytes = 0;
+          for (const l of t.links) {
+            if (!l.file) continue;
+            const data = fs.readFileSync(l.file).toString('base64');
+            if (items.length && (items.length >= 25 || bytes + data.length > 2e6)) {
+              batches.push({ title: t.title, items });
+              made += 1;
+              items = [];
+              bytes = 0;
+              if (made >= 2) break;
+            }
+            items.push({ link: l.link, data, file: l.file });
+            bytes += data.length;
+          }
+          if (items.length && made < 2) batches.push({ title: t.title, items });
+        }
+        let done = 0;
+        let lastError = '';
+        const queue = [...batches];
+        const worker = async () => {
+          for (let b = queue.shift(); b; b = queue.shift()) {
+            try {
+              const r = await this.postHelper({ tab: b.title, items: b.items.map(({ link, data }) => ({ link, data })) }, 6 * 60 * 1000);
+              done += r.done || 0;
+              if (r.failed && r.failed.length) { // too big for a cell: send a smaller copy
+                const small = await Promise.all(b.items.filter((it) => r.failed.includes(it.link)).map(async (it) => ({
+                  link: it.link,
+                  data: (await sharp(it.file).resize({ width: 720, height: 720, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer()).toString('base64'),
+                })));
+                const r2 = await this.postHelper({ tab: b.title, items: small }, 6 * 60 * 1000);
+                done += r2.done || 0;
+              }
+            } catch (err) {
+              lastError = err.message;
+            }
+            this.helperLeft = Math.max(0, this.helperLeft - (b.items.length));
+            this.changed();
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(8, batches.length) }, worker));
+        this.helperError = done ? '' : lastError;
+        if (done) console.log(`[sheets] photo helper: ${done} photos put into the sheet`);
+        if (!done) break; // nothing went in (helper error / PC busy): try again later
       }
     } catch (err) {
       this.helperError = err.message;
