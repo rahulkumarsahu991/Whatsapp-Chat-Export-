@@ -39,7 +39,6 @@ const GROUP_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Reply 
 const PERSONAL_HEAD = ['Chat', ...GROUP_HEAD];
 const V1_HEAD = ['Date', 'Time', 'Day', 'Sender', 'Phone', 'Message', 'Type']; // first version (no gap filling)
 const PHOTO_ROW_PX = 110; // rows with a photo are this tall, the others normal
-const TEXT_ROW_PX = 21;
 const PREVIEW_PX = 1000; // photo size kept for the sheet (longest side): HD, still under Google's 1-megapixel cell limit
 const PHOTO_VERSION = 2; // 2 = HD photos; sheets with older photos get them redone once
 const PHOTO_TYPES = new Set(['image', 'sticker']); // downloaded in full; videos show their preview frame
@@ -205,7 +204,10 @@ async function batchUpdate(id, requests) {
     if (r.addSheet) book.sheets.push({ sheetId: r.addSheet.properties.sheetId, title: r.addSheet.properties.title, rows: [], heights: {} });
     if (r.appendCells) {
       const tab = tabOf(r.appendCells.sheetId);
-      for (const row of r.appendCells.rows) tab.rows.push(row.values.map(value));
+      for (const row of r.appendCells.rows) {
+        tab.rows.push(row.values.map(value));
+        tab.wrapCells = (tab.wrapCells || 0) + row.values.filter((v) => v && v.userEnteredFormat && v.userEnteredFormat.wrapStrategy === 'WRAP').length;
+      }
     }
     if (r.insertDimension) {
       const { sheetId, dimension, startIndex, endIndex } = r.insertDimension.range;
@@ -238,6 +240,17 @@ async function batchUpdate(id, requests) {
       const re = new RegExp(r.findReplace.find, 'g');
       for (const tab of book.sheets) tab.rows = tab.rows.map((row) => row.map((v) => (typeof v === 'string' && v.startsWith('=') ? v.replace(re, r.findReplace.replacement) : v)));
     }
+    if (r.autoResizeDimensions && r.autoResizeDimensions.dimensions.dimension === 'ROWS') {
+      const { sheetId, startIndex, endIndex } = r.autoResizeDimensions.dimensions;
+      const tab = tabOf(sheetId);
+      tab.heights = tab.heights || {};
+      for (let i = startIndex; i < endIndex; i += 1) tab.heights[i] = 21; // "fits its text"
+    }
+    if (r.repeatCell) {
+      const { sheetId, startColumnIndex } = r.repeatCell.range;
+      const tab = tabOf(sheetId);
+      tab.wrapped = [...new Set([...(tab.wrapped || []), startColumnIndex])];
+    }
     if (r.sortRange) {
       const tab = tabOf(r.sortRange.range.sheetId);
       const col = r.sortRange.sortSpecs[0].dimensionIndex;
@@ -268,6 +281,9 @@ async function valuesBatchGet(id, ranges, major = 'COLUMNS', render = 'UNFORMATT
 
 const cell = (v) => ({ userEnteredValue: { stringValue: String(v ?? '').slice(0, MAX_CELL) } });
 const numCell = (n) => ({ userEnteredValue: { numberValue: n } });
+// text that wraps inside its cell: a message with several lines shows all of them, like in WhatsApp
+const wrapCell = (v) => ({ ...cell(v), userEnteredFormat: { wrapStrategy: 'WRAP' } });
+const WRITE_FIELDS = 'userEnteredValue,userEnteredFormat.wrapStrategy';
 const boldCell = (v) => ({ ...cell(v), userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.86, green: 0.97, blue: 0.9 } } });
 const colLetter = (i) => { let s = ''; for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
 const quoteTitle = (t) => `'${String(t).replace(/'/g, "''")}'`;
@@ -301,13 +317,10 @@ function heightRequests(sheetId, start, flags) {
   for (let i = 0; i < flags.length;) {
     let j = i;
     while (j < flags.length && flags[j] === flags[i]) j += 1;
-    reqs.push({
-      updateDimensionProperties: {
-        range: { sheetId, dimension: 'ROWS', startIndex: start + i, endIndex: start + j },
-        properties: { pixelSize: flags[i] ? PHOTO_ROW_PX : TEXT_ROW_PX },
-        fields: 'pixelSize',
-      },
-    });
+    const range = { sheetId, dimension: 'ROWS', startIndex: start + i, endIndex: start + j };
+    reqs.push(flags[i]
+      ? { updateDimensionProperties: { range, properties: { pixelSize: PHOTO_ROW_PX }, fields: 'pixelSize' } }
+      : { autoResizeDimensions: { dimensions: range } }); // as tall as its text (all lines of a message)
     i = j;
   }
   return reqs;
@@ -519,7 +532,7 @@ class SheetSync extends EventEmitter {
       this.cfg = {
         version: 3, enabled: true, spreadsheetId: id, title: meta.title, since: sinceKey, sinceTs, account: (me && me.id) || '',
         connectedAt: Date.now(), tabs: {}, cursors: {}, written: {}, rows: 0, lastWriteAt: 0,
-        imgSecret: crypto.randomBytes(16).toString('hex'), photoVersion: PHOTO_VERSION,
+        imgSecret: crypto.randomBytes(16).toString('hex'), photoVersion: PHOTO_VERSION, formatVersion: 1,
       };
       this.written = new Map();
       this.titles = null;
@@ -583,6 +596,7 @@ class SheetSync extends EventEmitter {
           this.cfg.enrichPending = 'hd'; // redo the sheet's photos in HD (newest first)
           this.save();
         }
+        if (this.version >= 3 && (this.cfg.formatVersion || 0) < 1) await this.wrapExistingRows();
         if (this.cfg.enrichPending) {
           const ep = this.cfg.enrichPending;
           await this.enrichOldRows(ep === 'hd' ? { mode: 'hd' } : typeof ep === 'object' ? ep : { mode: 'all' });
@@ -737,8 +751,8 @@ class SheetSync extends EventEmitter {
     }
     const photo = await this.photoCell(m);
     const row = [
-      cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), cell(m.text),
-      cell(this.replyText(m)), cell(m.typeLabel), photo || cell(''), numCell(m.ts + Math.min(seq, 999) / 1000),
+      cell(m.date), cell(m.time), cell(m.day), cell(m.name), cell(m.phone), wrapCell(m.text),
+      wrapCell(this.replyText(m)), cell(m.typeLabel), photo || cell(''), numCell(m.ts + Math.min(seq, 999) / 1000),
     ];
     return { values: personal ? [cell(chat.name), ...row] : row, photo: !!photo };
   }
@@ -818,7 +832,7 @@ class SheetSync extends EventEmitter {
   cellAt(tabKey, tab, row, name, value) {
     const c = this.colOf(tabKey, tab, name);
     if (c < 0) return null;
-    return { updateCells: { start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: c }, rows: [{ values: [value] }], fields: 'userEnteredValue' } };
+    return { updateCells: { start: { sheetId: tab.sheetId, rowIndex: row, columnIndex: c }, rows: [{ values: [value] }], fields: WRITE_FIELDS } };
   }
 
   /** Writes all queued rows, then saves the progress. */
@@ -867,10 +881,10 @@ class SheetSync extends EventEmitter {
         const start = 1 + b.pos + added; // row 0 is the header
         const data = b.rows.map((r) => ({ values: this.align(k, tab, r.values) }));
         if (b.pos >= keys.length) {
-          requests.push({ appendCells: { sheetId: tab.sheetId, rows: data, fields: 'userEnteredValue' } });
+          requests.push({ appendCells: { sheetId: tab.sheetId, rows: data, fields: WRITE_FIELDS } });
         } else {
           requests.push({ insertDimension: { range: { sheetId: tab.sheetId, dimension: 'ROWS', startIndex: start, endIndex: start + data.length }, inheritFromBefore: false } });
-          requests.push({ updateCells: { start: { sheetId: tab.sheetId, rowIndex: start, columnIndex: 0 }, rows: data, fields: 'userEnteredValue' } });
+          requests.push({ updateCells: { start: { sheetId: tab.sheetId, rowIndex: start, columnIndex: 0 }, rows: data, fields: WRITE_FIELDS } });
         }
         requests.push(...heightRequests(tab.sheetId, start, b.rows.map((r) => r.photo)));
         added += b.rows.length;
@@ -1060,7 +1074,7 @@ class SheetSync extends EventEmitter {
           if (made[j] && made[j].hd) add(this.cellAt(tgt.tabKey, tab, row, 'Photo', photo));
           return;
         }
-        add(this.cellAt(tgt.tabKey, tab, row, 'Reply to', cell(this.replyText(tgt.m))));
+        add(this.cellAt(tgt.tabKey, tab, row, 'Reply to', wrapCell(this.replyText(tgt.m))));
         add(this.cellAt(tgt.tabKey, tab, row, 'Type', cell(tgt.m.typeLabel)));
         add(this.cellAt(tgt.tabKey, tab, row, 'Photo', photo || cell('')));
         if (repair) add(this.cellAt(tgt.tabKey, tab, row, 'Sort', numCell(tgt.key)));
@@ -1242,6 +1256,45 @@ class SheetSync extends EventEmitter {
       this.pumping = false;
       this.changed();
     }
+  }
+
+  /**
+   * Once per sheet: the Message and Reply to columns wrap their text, and rows are as tall as their
+   * text, so messages with several lines show every line (like in WhatsApp). Photo rows stay tall.
+   */
+  async wrapExistingRows() {
+    const id = this.cfg.spreadsheetId;
+    this.phase = 'upgrade';
+    this.changed();
+    const heads = await this.loadHeads(true);
+    const meta = await getMeta(id);
+    const titleOf = new Map(meta.tabs.map((t) => [t.sheetId, t.title]));
+    const tabs = Object.values(this.cfg.tabs).filter((t) => titleOf.has(t.sheetId) && heads.get(t.sheetId));
+    // which rows hold a photo (their Type), to keep those tall
+    const typeCols = await valuesBatchGet(id, tabs.map((t) => {
+      const c = colLetter(heads.get(t.sheetId).Type ?? 0);
+      return `${quoteTitle(titleOf.get(t.sheetId))}!${c}2:${c}`;
+    }), 'COLUMNS', 'FORMATTED_VALUE');
+    const requests = [];
+    tabs.forEach((t, i) => {
+      const cols = heads.get(t.sheetId);
+      for (const name of ['Message', 'Reply to']) {
+        if (cols[name] === undefined) continue;
+        requests.push({
+          repeatCell: {
+            range: { sheetId: t.sheetId, startRowIndex: 1, startColumnIndex: cols[name], endColumnIndex: cols[name] + 1 },
+            cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+            fields: 'userEnteredFormat.wrapStrategy',
+          },
+        });
+      }
+      const types = typeCols[i] || [];
+      if (types.length) requests.push(...heightRequests(t.sheetId, 1, types.map((v) => /^(Photo|Video|Sticker|GIF|Video note)$/.test(String(v)))));
+    });
+    for (let i = 0; i < requests.length; i += 800) await batchUpdate(id, requests.slice(i, i + 800));
+    this.cfg.formatVersion = 1;
+    this.save();
+    console.log('[sheets] long and multi-line messages now show in full (wrapped text, row heights fit)');
   }
 
   /** New messages that came in: write them now. */
